@@ -1,0 +1,11 @@
+{
+  "domain": "ev_load_balancer",
+  "name": "EV Load Balancer",
+  "version": "0.1.0",
+  "documentation": "https://github.com/cryptotomte/ev-load-balancer",
+  "issue_tracker": "https://github.com/cryptotomte/ev-load-balancer/issues",
+  "codeowners": ["@cryptotomte"],
+  "iot_class": "calculated",
+  "requirements": [],
+  "homeassistant": "2024.1.0"
+}

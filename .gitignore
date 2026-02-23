@@ -1,0 +1,17 @@
+# Utvecklingsflöde (internt)
+CLAUDE.md
+.claude/
+.specify/
+specs/
+docs/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Verktyg (genererat)
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
