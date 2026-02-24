@@ -1,0 +1,651 @@
+"""Tester för sensor-plattformen (sensor.py).
+
+Täcker:
+- US1: 6 sensorentiteter skapas, _attr_should_poll = False, status-sensor
+- US2: Fasmedveten beräkning, map-parsning, fallback
+- US3: Nedreglering utan cooldown
+- US4: PAUSED-transition vid kapacitetsbrist
+"""
+
+from __future__ import annotations
+
+from unittest.mock import MagicMock, patch
+
+import pytest
+from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+from custom_components.ev_load_balancer.const import DOMAIN
+from custom_components.ev_load_balancer.sensor import (
+    AvailableCurrentSensor,
+    BalancerStatusSensor,
+    EVLoadBalancerCoordinator,
+    TargetCurrentSensor,
+    async_setup_entry,
+)
+from custom_components.ev_load_balancer.state_machine import BalancerState
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def full_config_entry():
+    """MockConfigEntry med komplett konfiguration (3 faser, go-e profil)."""
+    return MockConfigEntry(
+        domain=DOMAIN,
+        title="EV Load Balancer Test",
+        data={
+            "profile_id": "goe_gemini",
+            "serial": "409787",
+            "charger_entities": {
+                "amp": "number.goe_409787_amp",
+                "frc": "select.goe_409787_frc",
+                "psm": "select.goe_409787_psm",
+                "car_value": "sensor.goe_409787_car_value",
+                "nrg_4": "sensor.goe_409787_nrg_4",
+                "nrg_5": "sensor.goe_409787_nrg_5",
+                "nrg_6": "sensor.goe_409787_nrg_6",
+                "map": "sensor.goe_409787_map",
+            },
+            "phases": [
+                {"sensor": "sensor.current_l1", "max_ampere": 25, "label": "L1"},
+                {"sensor": "sensor.current_l2", "max_ampere": 25, "label": "L2"},
+                {"sensor": "sensor.current_l3", "max_ampere": 25, "label": "L3"},
+            ],
+            "safety_margin": 2,
+            "min_current": 6,
+            "max_current": 16,
+            "phase_count": "auto",
+        },
+    )
+
+
+@pytest.fixture
+def single_phase_entry():
+    """MockConfigEntry med 1 fas (L2) konfiguration."""
+    return MockConfigEntry(
+        domain=DOMAIN,
+        title="EV Load Balancer 1-fas",
+        data={
+            "profile_id": "goe_gemini",
+            "serial": "409787",
+            "charger_entities": {
+                "car_value": "sensor.goe_409787_car_value",
+                "nrg_4": "sensor.goe_409787_nrg_4",
+                "nrg_5": "sensor.goe_409787_nrg_5",
+                "nrg_6": "sensor.goe_409787_nrg_6",
+                "map": "sensor.goe_409787_map",
+            },
+            "phases": [
+                {"sensor": "sensor.current_l1", "max_ampere": 25, "label": "L1"},
+                {"sensor": "sensor.current_l2", "max_ampere": 16, "label": "L2"},
+                {"sensor": "sensor.current_l3", "max_ampere": 25, "label": "L3"},
+            ],
+            "safety_margin": 2,
+            "min_current": 6,
+            "max_current": 16,
+        },
+    )
+
+
+def _make_mock_state(state_value: str):
+    """Hjälpfunktion: skapa MockState med ett givet state-värde."""
+    mock_state = MagicMock()
+    mock_state.state = state_value
+    return mock_state
+
+
+# ---------------------------------------------------------------------------
+# US1: async_setup_entry skapar 6 sensorentiteter
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_async_setup_entry_creates_6_sensors(hass, full_config_entry):
+    """async_setup_entry ska skapa 6 sensorentiteter och lägga dem till HA."""
+    full_config_entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN][full_config_entry.entry_id] = {}
+
+    # Mocka Debouncer för att undvika faktiska timer-anrop
+    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
+        mock_debouncer = MagicMock()
+        mock_debouncer.async_schedule_call = MagicMock()
+        mock_debouncer.async_cancel = MagicMock()
+        mock_debouncer_cls.return_value = mock_debouncer
+
+        added_entities = []
+
+        def mock_add_entities(entities):
+            added_entities.extend(entities)
+
+        await async_setup_entry(hass, full_config_entry, mock_add_entities)
+
+    assert len(added_entities) == 6
+    # Verifiera att koordinatorn lagrades i hass.data
+    assert "coordinator" in hass.data[DOMAIN][full_config_entry.entry_id]
+
+
+@pytest.mark.asyncio
+async def test_sensors_have_correct_types(hass, full_config_entry):
+    """De 6 sensorerna ska ha rätt typer."""
+    full_config_entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN][full_config_entry.entry_id] = {}
+
+    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
+        mock_debouncer = MagicMock()
+        mock_debouncer.async_schedule_call = MagicMock()
+        mock_debouncer_cls.return_value = mock_debouncer
+
+        added_entities = []
+
+        def mock_add_entities(entities):
+            added_entities.extend(entities)
+
+        await async_setup_entry(hass, full_config_entry, mock_add_entities)
+
+    # Kontrollera typer: 1 status, 4 available (l1/l2/l3/min), 1 target
+    status_sensors = [e for e in added_entities if isinstance(e, BalancerStatusSensor)]
+    available_sensors = [e for e in added_entities if isinstance(e, AvailableCurrentSensor)]
+    target_sensors = [e for e in added_entities if isinstance(e, TargetCurrentSensor)]
+
+    assert len(status_sensors) == 1
+    assert len(available_sensors) == 4
+    assert len(target_sensors) == 1
+
+
+# ---------------------------------------------------------------------------
+# US1: _attr_should_poll = False
+# ---------------------------------------------------------------------------
+
+
+def test_status_sensor_should_not_poll(full_config_entry):
+    """BalancerStatusSensor._attr_should_poll ska vara False."""
+    coordinator = _make_coordinator(full_config_entry)
+    sensor = BalancerStatusSensor(coordinator)
+    assert sensor._attr_should_poll is False
+
+
+def test_available_sensor_should_not_poll(full_config_entry):
+    """AvailableCurrentSensor._attr_should_poll ska vara False."""
+    coordinator = _make_coordinator(full_config_entry)
+    sensor = AvailableCurrentSensor(coordinator, "l1")
+    assert sensor._attr_should_poll is False
+
+
+def test_target_sensor_should_not_poll(full_config_entry):
+    """TargetCurrentSensor._attr_should_poll ska vara False."""
+    coordinator = _make_coordinator(full_config_entry)
+    sensor = TargetCurrentSensor(coordinator)
+    assert sensor._attr_should_poll is False
+
+
+# ---------------------------------------------------------------------------
+# US1: Status-sensor visar "initializing" vid start
+# ---------------------------------------------------------------------------
+
+
+def test_status_sensor_initial_value_is_initializing(full_config_entry):
+    """Status-sensorn ska visa 'initializing' direkt efter skapande."""
+    coordinator = _make_coordinator(full_config_entry)
+    sensor = BalancerStatusSensor(coordinator)
+    assert sensor.native_value == "initializing"
+
+
+# ---------------------------------------------------------------------------
+# US1: Unavailable-hantering — sensor returnerar None (inte 0)
+# ---------------------------------------------------------------------------
+
+
+def test_available_sensor_returns_none_when_no_result(full_config_entry):
+    """AvailableCurrentSensor ska returnera None om last_result är None."""
+    coordinator = _make_coordinator(full_config_entry)
+    sensor = AvailableCurrentSensor(coordinator, "l1")
+    assert coordinator.last_result is None
+    assert sensor.native_value is None
+
+
+def test_target_sensor_returns_none_when_no_result(full_config_entry):
+    """TargetCurrentSensor ska returnera None om last_result är None."""
+    coordinator = _make_coordinator(full_config_entry)
+    sensor = TargetCurrentSensor(coordinator)
+    assert coordinator.last_result is None
+    assert sensor.native_value is None
+
+
+# ---------------------------------------------------------------------------
+# US1: Status-sensorns extra_state_attributes
+# ---------------------------------------------------------------------------
+
+
+def test_status_sensor_extra_attributes_before_calculation(full_config_entry):
+    """Status-sensorns attribut ska hantera None korrekt före beräkning."""
+    coordinator = _make_coordinator(full_config_entry)
+    sensor = BalancerStatusSensor(coordinator)
+    attrs = sensor.extra_state_attributes
+
+    assert attrs["target_current"] is None
+    assert attrs["pause_reason"] is None
+    assert attrs["last_calculation"] is None
+    assert attrs["phase_loads"] is None
+    assert attrs["device_loads"] is None
+    assert attrs["active_phases"] is None
+    assert attrs["charging_mode"] is None
+    assert attrs["safety_margin"] == 2.0
+    assert attrs["charger_profile"] == "goe_gemini"
+
+
+# ---------------------------------------------------------------------------
+# US2: Map-sensor parsing
+# ---------------------------------------------------------------------------
+
+
+def test_coordinator_reads_map_3phase(hass, full_config_entry):
+    """Koordinatorn ska parsa map='[1, 2, 3]' till [1, 2, 3]."""
+    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
+        mock_debouncer_cls.return_value = MagicMock()
+        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+
+    # Sätt map-sensorns state
+    hass.states.async_set("sensor.goe_409787_map", "[1, 2, 3]")
+
+    result = coordinator._read_active_phases_sync()
+    assert result == [1, 2, 3]
+
+
+def test_coordinator_reads_map_1phase(hass, full_config_entry):
+    """Koordinatorn ska parsa map='[2]' till [2]."""
+    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
+        mock_debouncer_cls.return_value = MagicMock()
+        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+
+    hass.states.async_set("sensor.goe_409787_map", "[2]")
+
+    result = coordinator._read_active_phases_sync()
+    assert result == [2]
+
+
+def test_coordinator_fallback_when_map_unavailable(hass, full_config_entry):
+    """Koordinatorn ska fallback till alla faser om map är unavailable."""
+    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
+        mock_debouncer_cls.return_value = MagicMock()
+        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+
+    # map är unavailable
+    hass.states.async_set("sensor.goe_409787_map", "unavailable")
+
+    result = coordinator._read_active_phases_sync()
+    # 3 faser konfigurerade → fallback [1, 2, 3]
+    assert result == [1, 2, 3]
+
+
+def test_coordinator_fallback_when_map_missing(hass, full_config_entry):
+    """Koordinatorn ska fallback till alla faser om map-state saknas."""
+    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
+        mock_debouncer_cls.return_value = MagicMock()
+        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+
+    # map-sensorn finns inte i states
+    result = coordinator._read_active_phases_sync()
+    assert result == [1, 2, 3]
+
+
+# ---------------------------------------------------------------------------
+# US2: Sensor-uppdatering efter beräkning
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_available_sensors_updated_after_calculation(hass, full_config_entry):
+    """available_l* ska uppdateras korrekt efter beräkning."""
+    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
+        mock_debouncer_cls.return_value = MagicMock()
+        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+
+    # Sätt upp sensorstates (PRD §9 Scenario 1-liknande)
+    hass.states.async_set("sensor.current_l1", "18.3")
+    hass.states.async_set("sensor.current_l2", "12.1")
+    hass.states.async_set("sensor.current_l3", "15.7")
+    hass.states.async_set("sensor.goe_409787_nrg_4", "10.0")
+    hass.states.async_set("sensor.goe_409787_nrg_5", "10.0")
+    hass.states.async_set("sensor.goe_409787_nrg_6", "10.0")
+    hass.states.async_set("sensor.goe_409787_map", "[1, 2, 3]")
+    hass.states.async_set("sensor.goe_409787_car_value", "Idle")
+
+    await coordinator._async_calculate()
+
+    assert coordinator.last_result is not None
+    l1_sensor = AvailableCurrentSensor(coordinator, "l1")
+    l2_sensor = AvailableCurrentSensor(coordinator, "l2")
+    l3_sensor = AvailableCurrentSensor(coordinator, "l3")
+    min_sensor = AvailableCurrentSensor(coordinator, "min")
+    target_sensor = TargetCurrentSensor(coordinator)
+
+    # PRD §9 Scenario 1: available_l1=14.7, target=14A
+    assert abs(l1_sensor.native_value - 14.7) < 0.01
+    assert abs(l2_sensor.native_value - 20.9) < 0.01
+    assert abs(l3_sensor.native_value - 17.3) < 0.01
+    assert abs(min_sensor.native_value - 14.7) < 0.01
+    assert target_sensor.native_value == 14
+
+
+# ---------------------------------------------------------------------------
+# US3: Nedreglering utan cooldown
+# ---------------------------------------------------------------------------
+
+
+def test_handle_state_change_downregulation_cancels_debouncer(hass, full_config_entry):
+    """Nedreglering ska avbryta debouncer och skapa en direkt task."""
+    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
+        mock_debouncer = MagicMock()
+        mock_debouncer_cls.return_value = mock_debouncer
+        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+
+    # Sätt current_target högt (simulerar aktiv laddning)
+    coordinator._current_target = 14
+
+    # Sätt sensorvärden som ger lägre preview (<14)
+    hass.states.async_set("sensor.current_l1", "24.0")  # max 25 - 24 - 2 = -1 → kläms till 6
+    hass.states.async_set("sensor.current_l2", "24.0")
+    hass.states.async_set("sensor.current_l3", "24.0")
+    hass.states.async_set("sensor.goe_409787_nrg_4", "0.0")
+    hass.states.async_set("sensor.goe_409787_nrg_5", "0.0")
+    hass.states.async_set("sensor.goe_409787_nrg_6", "0.0")
+    hass.states.async_set("sensor.goe_409787_map", "[1, 2, 3]")
+
+    # Skapa mock event
+    mock_event = MagicMock()
+
+    with patch.object(hass, "async_create_task") as mock_create_task:
+        coordinator._handle_state_change(mock_event)
+
+    # Nedreglering ska avbryta debouncer
+    mock_debouncer.async_cancel.assert_called_once()
+    # Och skapa en direkt task
+    mock_create_task.assert_called_once()
+
+
+def test_handle_state_change_upregulation_uses_debouncer(hass, full_config_entry):
+    """Uppåtreglering ska använda debouncer (cooldown)."""
+    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
+        mock_debouncer = MagicMock()
+        mock_debouncer_cls.return_value = mock_debouncer
+        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+
+    # Sätt current_target lågt — preview blir högre
+    coordinator._current_target = 6
+
+    # Sätt sensorvärden som ger högt preview (>6)
+    hass.states.async_set("sensor.current_l1", "5.0")
+    hass.states.async_set("sensor.current_l2", "5.0")
+    hass.states.async_set("sensor.current_l3", "5.0")
+    hass.states.async_set("sensor.goe_409787_nrg_4", "0.0")
+    hass.states.async_set("sensor.goe_409787_nrg_5", "0.0")
+    hass.states.async_set("sensor.goe_409787_nrg_6", "0.0")
+    hass.states.async_set("sensor.goe_409787_map", "[1, 2, 3]")
+
+    mock_event = MagicMock()
+
+    with patch.object(hass, "async_create_task") as mock_create_task:
+        coordinator._handle_state_change(mock_event)
+
+    # Uppåtreglering: INGEN cancel av debouncer
+    mock_debouncer.async_cancel.assert_not_called()
+    # Debouncer ska schemaläggas
+    mock_debouncer.async_schedule_call.assert_called()
+    # Ingen direkt task
+    mock_create_task.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# US4: BALANCING → PAUSED vid kapacitetsbrist
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_paused_transition_when_target_below_min(hass, full_config_entry):
+    """BALANCING → PAUSED när available_min < min_current (kapacitetsbrist).
+
+    Med Fix 1 jämför koordinatorn result.available_min mot min_current (oklämd),
+    vilket gör PAUSED-tillståndet nåbart trots att calculator klämer target_current.
+
+    Scenario: last=18.1A per fas, device=0, safety=2, max=25
+        available = 25 - (18.1 - 0) - 2 = 4.9A < min_current=6 → PAUSED
+    """
+    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
+        mock_debouncer_cls.return_value = MagicMock()
+        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+
+    # Sätt state till BALANCING
+    sm = coordinator._state_machine
+    sm.record_successful_calculation()
+    sm.record_successful_calculation()
+    sm.on_car_connected()
+    assert coordinator.state == BalancerState.BALANCING
+
+    # Sensorvärden: available = 25 - (18.1 - 0) - 2 = 4.9A < min_current=6
+    hass.states.async_set("sensor.current_l1", "18.1")
+    hass.states.async_set("sensor.current_l2", "18.1")
+    hass.states.async_set("sensor.current_l3", "18.1")
+    hass.states.async_set("sensor.goe_409787_nrg_4", "0.0")
+    hass.states.async_set("sensor.goe_409787_nrg_5", "0.0")
+    hass.states.async_set("sensor.goe_409787_nrg_6", "0.0")
+    hass.states.async_set("sensor.goe_409787_map", "[1, 2, 3]")
+    hass.states.async_set("sensor.goe_409787_car_value", "Charging")
+
+    await coordinator._async_calculate()
+
+    # available_min = 4.9 < min_current=6 → PAUSED
+    assert coordinator.last_result is not None
+    assert coordinator.last_result.available_min < coordinator._min_current
+    assert coordinator.state == BalancerState.PAUSED
+    assert coordinator.pause_reason == "below_min_current"
+
+
+@pytest.mark.asyncio
+async def test_paused_transition_with_unclamped_logic(hass, full_config_entry):
+    """BALANCING → PAUSED när beräknat available_min < min_current.
+
+    I denna implementation används result.target_current (klämt).
+    PAUSED triggas om target_current == min_current OCH available_min < min.
+    Testet verifierar PAUSED-logiken via direkt state machine-manipulation.
+    """
+    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
+        mock_debouncer_cls.return_value = MagicMock()
+        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+
+    # Sätt state till BALANCING manuellt
+    sm = coordinator._state_machine
+    sm.record_successful_calculation()
+    sm.record_successful_calculation()
+    sm.on_car_connected()
+    assert coordinator.state == BalancerState.BALANCING
+
+    # Manuellt trigga on_below_min_current (simulerar att koordinatorn
+    # detekterar kapacitetsbrist)
+    sm.on_below_min_current()
+    coordinator._pause_reason = "below_min_current"
+
+    assert coordinator.state == BalancerState.PAUSED
+    assert coordinator.pause_reason == "below_min_current"
+
+    # Status-sensorn ska visa "paused"
+    sensor = BalancerStatusSensor(coordinator)
+    assert sensor.native_value == "paused"
+    attrs = sensor.extra_state_attributes
+    assert attrs["pause_reason"] == "below_min_current"
+
+
+@pytest.mark.asyncio
+async def test_paused_to_balancing_transition(hass, full_config_entry):
+    """PAUSED → BALANCING när target_current >= min_current."""
+    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
+        mock_debouncer_cls.return_value = MagicMock()
+        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+
+    # Sätt state till PAUSED
+    sm = coordinator._state_machine
+    sm.record_successful_calculation()
+    sm.record_successful_calculation()
+    sm.on_car_connected()
+    sm.on_below_min_current()
+    coordinator._pause_reason = "below_min_current"
+    assert coordinator.state == BalancerState.PAUSED
+
+    # Sätt sensorvärden som ger target >= min_current (bra kapacitet)
+    hass.states.async_set("sensor.current_l1", "5.0")
+    hass.states.async_set("sensor.current_l2", "5.0")
+    hass.states.async_set("sensor.current_l3", "5.0")
+    hass.states.async_set("sensor.goe_409787_nrg_4", "0.0")
+    hass.states.async_set("sensor.goe_409787_nrg_5", "0.0")
+    hass.states.async_set("sensor.goe_409787_nrg_6", "0.0")
+    hass.states.async_set("sensor.goe_409787_map", "[1, 2, 3]")
+    hass.states.async_set("sensor.goe_409787_car_value", "Charging")
+
+    await coordinator._async_calculate()
+
+    # target = 25 - 5 - 2 = 18 → klämt till 16 ≥ min_current=6 → BALANCING
+    assert coordinator.state == BalancerState.BALANCING
+    assert coordinator.pause_reason is None
+
+
+# ---------------------------------------------------------------------------
+# US4: pause_reason sätts/rensas korrekt i status-sensorns attribut
+# ---------------------------------------------------------------------------
+
+
+def test_status_sensor_pause_reason_in_attributes(full_config_entry):
+    """pause_reason ska synas i status-sensorns extra_state_attributes."""
+    coordinator = _make_coordinator(full_config_entry)
+    coordinator._pause_reason = "below_min_current"
+
+    sensor = BalancerStatusSensor(coordinator)
+    attrs = sensor.extra_state_attributes
+    assert attrs["pause_reason"] == "below_min_current"
+
+
+def test_status_sensor_no_pause_reason_when_balancing(full_config_entry):
+    """pause_reason ska vara None när state är BALANCING."""
+    coordinator = _make_coordinator(full_config_entry)
+    sm = coordinator._state_machine
+    sm.record_successful_calculation()
+    sm.record_successful_calculation()
+    sm.on_car_connected()
+
+    sensor = BalancerStatusSensor(coordinator)
+    attrs = sensor.extra_state_attributes
+    assert attrs["pause_reason"] is None
+
+
+# ---------------------------------------------------------------------------
+# Koordinator: options > data prioritering
+# ---------------------------------------------------------------------------
+
+
+def test_coordinator_reads_options_over_data(hass):
+    """Koordinatorn ska läsa från entry.options framför entry.data."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Test",
+        data={
+            "profile_id": "goe_gemini",
+            "phases": [{"sensor": "sensor.old", "max_ampere": 20, "label": "L1"}],
+            "safety_margin": 3,
+            "min_current": 6,
+            "max_current": 16,
+            "charger_entities": {},
+        },
+        options={
+            "phases": [{"sensor": "sensor.new", "max_ampere": 25, "label": "L1"}],
+            "safety_margin": 2,
+            "min_current": 8,
+            "max_current": 14,
+            "charger_entities": {},
+        },
+    )
+
+    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
+        mock_debouncer_cls.return_value = MagicMock()
+        coordinator = EVLoadBalancerCoordinator(hass, entry)
+
+    # Options ska ha prioritet
+    assert coordinator._phases == [{"sensor": "sensor.new", "max_ampere": 25, "label": "L1"}]
+    assert coordinator._safety_margin == 2.0
+    assert coordinator._min_current == 8
+    assert coordinator._max_current == 14
+
+
+# ---------------------------------------------------------------------------
+# Koordinator: lyssnare registrering/avregistrering
+# ---------------------------------------------------------------------------
+
+
+def test_register_and_unregister_listener(full_config_entry):
+    """Koordinatorn ska stödja registrering och avregistrering av lyssnare."""
+    coordinator = _make_coordinator(full_config_entry)
+    initial_count = len(coordinator._notify_listeners)
+
+    called = []
+
+    def callback_fn() -> None:
+        called.append(True)
+
+    coordinator.register_listener(callback_fn)
+    assert len(coordinator._notify_listeners) == initial_count + 1
+
+    coordinator.unregister_listener(callback_fn)
+    assert len(coordinator._notify_listeners) == initial_count
+
+
+# ---------------------------------------------------------------------------
+# Sensor-lyssnare registreras i async_added_to_hass (inte __init__)
+# ---------------------------------------------------------------------------
+
+
+def test_sensor_does_not_register_listener_on_create(full_config_entry):
+    """Sensorerna ska INTE registrera sig hos koordinatorn i __init__.
+
+    Registrering sker i async_added_to_hass för korrekt HA-livscykel.
+    """
+    coordinator = _make_coordinator(full_config_entry)
+    initial_count = len(coordinator._notify_listeners)
+
+    BalancerStatusSensor(coordinator)
+
+    # Ingen lyssnare ska registreras i __init__
+    assert len(coordinator._notify_listeners) == initial_count
+
+
+@pytest.mark.asyncio
+async def test_sensor_registers_listener_in_async_added_to_hass(hass, full_config_entry):
+    """Sensorerna ska registrera sig hos koordinatorn i async_added_to_hass."""
+    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
+        mock_debouncer_cls.return_value = MagicMock()
+        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+
+    initial_count = len(coordinator._notify_listeners)
+
+    sensor = BalancerStatusSensor(coordinator)
+    sensor.hass = hass
+
+    await sensor.async_added_to_hass()
+
+    assert len(coordinator._notify_listeners) == initial_count + 1
+
+
+# ---------------------------------------------------------------------------
+# Hjälpfunktion för att skapa koordinator utan hass
+# ---------------------------------------------------------------------------
+
+
+def _make_coordinator(entry: MockConfigEntry) -> EVLoadBalancerCoordinator:
+    """Hjälpfunktion: skapa koordinator med mockad Debouncer."""
+    mock_hass = MagicMock()
+    mock_hass.states = MagicMock()
+    mock_hass.states.get = MagicMock(return_value=None)
+
+    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
+        mock_debouncer_cls.return_value = MagicMock()
+        return EVLoadBalancerCoordinator(mock_hass, entry)
