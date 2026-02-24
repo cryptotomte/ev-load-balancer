@@ -56,6 +56,17 @@ RESUME_DELAY_SECONDS = 30.0
 RESUME_THRESHOLD_OFFSET = 2
 """Offset i ampere ovanför min_current för att trigga resume (hysteres)."""
 
+# --- Fasväxlings-konstanter (PR-06) ---
+
+PHASE_SWITCH_UPSCALE_DELAY = 60
+"""Sekunder med alla faser >= min_current innan uppväxling 1→3 fas sker."""
+
+PSM_VALUE_1PHASE = "1"
+"""PSM select-värde för 1-fas laddning."""
+
+PSM_VALUE_3PHASE = "2"
+"""PSM select-värde för 3-fas laddning."""
+
 # Suffix för sensor-entitets-ID:n
 SENSOR_STATUS = "status"
 """Status-sensorns entitets-ID suffix."""
@@ -77,6 +88,20 @@ SENSOR_TARGET_CURRENT = "target_current"
 
 SENSOR_UTILIZATION = "utilization"
 """Kapacitetsutnyttjande i procent — sensorns ID suffix."""
+
+# --- Failsafe-konstanter (PR-05) ---
+
+CONF_ACTION_ON_SENSOR_LOSS = "action_on_sensor_loss"
+"""Nyckel för vald åtgärd vid sensorförlust ('reduce' eller 'pause')."""
+
+CONF_SAFE_DEFAULT_CURRENT = "safe_default_current"
+"""Nyckel för säker standardström i ampere vid reduce-åtgärd."""
+
+DEFAULT_SAFE_CURRENT = 6
+"""Standardström i ampere vid failsafe-reduce (IEC 61851 minimum)."""
+
+DEFAULT_SENSOR_LOSS_ACTION = "reduce"
+"""Standardåtgärd vid enskild sensorförlust ('reduce' eller 'pause')."""
 
 # --- Event-namn (PR-07) ---
 

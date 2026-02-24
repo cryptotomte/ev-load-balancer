@@ -1,5 +1,23 @@
 {
   "title": "EV Load Balancer",
+  "entity": {
+    "sensor": {
+      "status": {
+        "state_attributes": {
+          "charging_mode": {
+            "name": "Laddningsläge"
+          },
+          "phase_mode": {
+            "name": "Fasläge",
+            "state": {
+              "three_phase": "3-fas",
+              "one_phase": "1-fas"
+            }
+          }
+        }
+      }
+    }
+  },
   "config": {
     "step": {
       "user": {
@@ -82,6 +100,8 @@
           "min_current": "Minsta laddström (A)",
           "max_current": "Högsta laddström (A)",
           "phase_count": "Fasantal",
+          "action_on_sensor_loss": "Åtgärd vid sensorförlust",
+          "safe_default_current": "Säker standardström vid sensorförlust (A)",
           "capacity_warning_threshold": "Kapacitetsvarnings-tröskel (A)"
         }
       }
@@ -89,7 +109,16 @@
     "error": {
       "no_phases": "Minst en fassensor (L1) måste konfigureras.",
       "duplicate_phase_sensors": "Samma sensor kan inte användas för flera faser. Varje fas måste ha en unik strömsensor.",
-      "max_less_than_min": "Högsta laddström måste vara minst lika stor som lägsta laddström."
+      "max_less_than_min": "Högsta laddström måste vara minst lika stor som lägsta laddström.",
+      "safe_current_out_of_range": "Säker standardström måste vara mellan 6 och 16 A"
+    }
+  },
+  "selector": {
+    "action_on_sensor_loss": {
+      "options": {
+        "reduce": "Reducera till säker standardström",
+        "pause": "Pausa laddning"
+      }
     }
   },
   "entity": {

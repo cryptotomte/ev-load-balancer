@@ -27,6 +27,7 @@ from homeassistant.helpers.selector import (
 
 from .charger_profiles import PROFILES
 from .const import (
+    CONF_ACTION_ON_SENSOR_LOSS,
     CONF_CAPACITY_WARNING_THRESHOLD,
     CONF_CHARGER_ENTITIES,
     CONF_MAX_CURRENT,
@@ -34,13 +35,16 @@ from .const import (
     CONF_PHASE_COUNT,
     CONF_PHASES,
     CONF_PROFILE_ID,
+    CONF_SAFE_DEFAULT_CURRENT,
     CONF_SAFETY_MARGIN,
     CONF_SERIAL,
     DEFAULT_CAPACITY_WARNING_THRESHOLD,
     DEFAULT_MAX_CURRENT,
     DEFAULT_MIN_CURRENT,
     DEFAULT_PHASE_COUNT,
+    DEFAULT_SAFE_CURRENT,
     DEFAULT_SAFETY_MARGIN,
+    DEFAULT_SENSOR_LOSS_ACTION,
     DOMAIN,
 )
 
@@ -509,7 +513,7 @@ class EVLoadBalancerOptionsFlow(OptionsFlow):
         )
 
     async def async_step_params(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        """Steg 5: Ändra beräkningsparametrar."""
+        """Steg 5: Ändra beräkningsparametrar och failsafe-inställningar (PR-05)."""
         errors: dict[str, str] = {}
 
         # Pre-fill från befintliga options eller data
@@ -519,9 +523,12 @@ class EVLoadBalancerOptionsFlow(OptionsFlow):
         if user_input is not None:
             min_c = int(user_input[CONF_MIN_CURRENT])
             max_c = int(user_input[CONF_MAX_CURRENT])
+            safe_c = int(user_input[CONF_SAFE_DEFAULT_CURRENT])
 
             if max_c < min_c:
                 errors[CONF_MAX_CURRENT] = "max_less_than_min"
+            elif safe_c < 6 or safe_c > 16:
+                errors[CONF_SAFE_DEFAULT_CURRENT] = "safe_current_out_of_range"
             else:
                 # Slå ihop phases (från föregående steg) och parametrar
                 return self.async_create_entry(
@@ -531,6 +538,8 @@ class EVLoadBalancerOptionsFlow(OptionsFlow):
                         CONF_MIN_CURRENT: min_c,
                         CONF_MAX_CURRENT: max_c,
                         CONF_PHASE_COUNT: user_input[CONF_PHASE_COUNT],
+                        CONF_ACTION_ON_SENSOR_LOSS: user_input[CONF_ACTION_ON_SENSOR_LOSS],
+                        CONF_SAFE_DEFAULT_CURRENT: safe_c,
                         CONF_CAPACITY_WARNING_THRESHOLD: int(
                             user_input[CONF_CAPACITY_WARNING_THRESHOLD]
                         ),
@@ -553,6 +562,14 @@ class EVLoadBalancerOptionsFlow(OptionsFlow):
         default_phase_count = existing_options.get(
             CONF_PHASE_COUNT,
             existing_data.get(CONF_PHASE_COUNT, DEFAULT_PHASE_COUNT),
+        )
+        default_action = existing_options.get(
+            CONF_ACTION_ON_SENSOR_LOSS,
+            existing_data.get(CONF_ACTION_ON_SENSOR_LOSS, DEFAULT_SENSOR_LOSS_ACTION),
+        )
+        default_safe_current = existing_options.get(
+            CONF_SAFE_DEFAULT_CURRENT,
+            existing_data.get(CONF_SAFE_DEFAULT_CURRENT, DEFAULT_SAFE_CURRENT),
         )
         default_capacity_warning = existing_options.get(
             CONF_CAPACITY_WARNING_THRESHOLD,
@@ -605,6 +622,28 @@ class EVLoadBalancerOptionsFlow(OptionsFlow):
                         options=["auto", "1", "3"],
                         mode=SelectSelectorMode.DROPDOWN,
                         translation_key="phase_count",
+                    )
+                ),
+                vol.Required(
+                    CONF_ACTION_ON_SENSOR_LOSS,
+                    default=default_action,
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=["reduce", "pause"],
+                        mode=SelectSelectorMode.DROPDOWN,
+                        translation_key="action_on_sensor_loss",
+                    )
+                ),
+                vol.Required(
+                    CONF_SAFE_DEFAULT_CURRENT,
+                    default=default_safe_current,
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=6,
+                        max=16,
+                        step=1,
+                        unit_of_measurement="A",
+                        mode=NumberSelectorMode.BOX,
                     )
                 ),
                 vol.Required(
