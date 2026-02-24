@@ -219,37 +219,38 @@ class EVLoadBalancerCoordinator:
     def _fire_event(self, event_type: str, data: dict) -> None:
         """Skicka ett event till HA:s event bus.
 
-        Lägger automatiskt till entity_id och ISO 8601-tidsstämpel i event-data.
-        Hanterar eventuella fel via try/except för att inte påverka styrlogiken.
+        Lägger automatiskt till entry_id och ISO 8601-tidsstämpel i event-data.
+        hass.bus.async_fire är synkron och kastar inga undantag vid normal drift.
 
         Args:
             event_type: Event-typ, t.ex. EVENT_CURRENT_ADJUSTED.
             data: Extra kontext-data att inkludera i eventet.
         """
         event_data = {
-            "entity_id": f"sensor.{DOMAIN}_{SENSOR_STATUS}",
+            "entry_id": self.entry.entry_id,
             "timestamp": utcnow().isoformat(),
             **data,
         }
-        try:
-            self.hass.bus.async_fire(event_type, event_data)
-        except Exception:
-            _LOGGER.error(
-                "Misslyckades att skicka event '%s'",
-                event_type,
-                exc_info=True,
-            )
+        self.hass.bus.async_fire(event_type, event_data)
 
     def _get_capacity_warning_threshold(self) -> int:
         """Läs kapacitetsvarnings-tröskel med options > data > default-prioritering."""
         opts = self.entry.options
         data = self.entry.data
-        return int(
-            opts.get(
-                CONF_CAPACITY_WARNING_THRESHOLD,
-                data.get(CONF_CAPACITY_WARNING_THRESHOLD, DEFAULT_CAPACITY_WARNING_THRESHOLD),
-            )
+        raw = opts.get(
+            CONF_CAPACITY_WARNING_THRESHOLD,
+            data.get(CONF_CAPACITY_WARNING_THRESHOLD, DEFAULT_CAPACITY_WARNING_THRESHOLD),
         )
+        try:
+            return int(raw)
+        except (ValueError, TypeError):
+            _LOGGER.warning(
+                "Ogiltigt värde för %s: %r — faller tillbaka till default %sA",
+                CONF_CAPACITY_WARNING_THRESHOLD,
+                raw,
+                DEFAULT_CAPACITY_WARNING_THRESHOLD,
+            )
+            return DEFAULT_CAPACITY_WARNING_THRESHOLD
 
     def _check_capacity_warning(self, result: CalculationResult) -> None:
         """Kontrollera kapacitetsvarning och skicka event vid tillståndsövergång.
@@ -285,6 +286,15 @@ class EVLoadBalancerCoordinator:
                 result.available_min,
                 threshold,
             )
+            self._fire_event(
+                EVENT_CAPACITY_WARNING,
+                {
+                    "available_min": result.available_min,
+                    "threshold": threshold,
+                    "phase_loads": list(result.phase_loads),
+                    "active": False,
+                },
+            )
 
         self._last_capacity_warning = current_warning
 
@@ -298,6 +308,7 @@ class EVLoadBalancerCoordinator:
             sensor_entity: Entitets-ID för sensorn som försvann.
             action_taken: Beskrivning av vidtagen åtgärd.
         """
+        # TODO: PR-05 — anslut hit från _async_handle_sensor_unavailable
         _LOGGER.warning(
             "Sensorförlust: %s — åtgärd: %s",
             sensor_entity,
@@ -323,6 +334,7 @@ class EVLoadBalancerCoordinator:
             action: Vidtagen åtgärd.
             sensors_status: Dict med sensorernas status.
         """
+        # TODO: PR-05 — anslut hit från failsafe-logiken
         _LOGGER.error(
             "Failsafe aktiverad: trigger=%s, åtgärd=%s",
             trigger,
@@ -723,7 +735,9 @@ class EVLoadBalancerCoordinator:
                     cmd.reason,
                 )
 
-        # Kontrollera kapacitetsvarning och skicka event vid övergång
+        # VIKTIGT: kapacitetsvarning kontrolleras FÖRE _notify_all_listeners() för att
+        # säkerställa att event skickas på HA:s eventbuss innan binary_sensor:s
+        # state skrivs till HA via async_write_ha_state.
         self._check_capacity_warning(result)
 
         # Notifiera alla sensorlyssnare om uppdatering
@@ -992,7 +1006,23 @@ class UtilizationSensor(_EVSensorBase):
         for phase_num in active_phases:
             idx = phase_num - 1
             if 0 <= idx < len(phases):
-                active_max_values.append(float(phases[idx].get("max_ampere", 0)))
+                raw_max = phases[idx].get("max_ampere")
+                if raw_max is None or raw_max <= 0:
+                    _LOGGER.warning(
+                        "Fas %s saknar eller har ogiltigt max_ampere (%r) — "
+                        "hoppar över i utilization-beräkning",
+                        phase_num,
+                        raw_max,
+                    )
+                    continue
+                active_max_values.append(float(raw_max))
+            else:
+                _LOGGER.warning(
+                    "Fasnummer %s från aktiva faser utanför konfigurationsintervallet "
+                    "(konfigurerade faser: %s) — hoppar över",
+                    phase_num,
+                    len(phases),
+                )
 
         if not active_max_values:
             return None

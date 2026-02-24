@@ -5,7 +5,7 @@ Täcker:
 - US3: sensor_lost, failsafe_activated events
 - US4: phase_switched event
 - US5: Loggningsnivåer
-- Event-data: entity_id och timestamp validering
+- Event-data: entry_id och timestamp validering
 - Events skickas INTE vid dispatcher-failure
 """
 
@@ -150,7 +150,7 @@ async def test_event_current_adjusted_fires_on_amp_change(hass, full_config_entr
     assert "phase_loads" in event_data
     assert "available" in event_data
     assert "timestamp" in event_data
-    assert "entity_id" in event_data
+    assert "entry_id" in event_data
 
 
 @pytest.mark.asyncio
@@ -229,7 +229,7 @@ async def test_event_device_paused_fires_on_pause(hass, full_config_entry):
     assert "min_current" in event_data
     assert "phase_loads" in event_data
     assert "timestamp" in event_data
-    assert "entity_id" in event_data
+    assert "entry_id" in event_data
 
 
 @pytest.mark.asyncio
@@ -314,7 +314,7 @@ async def test_event_device_resumed_fires_on_resume(hass, full_config_entry):
     assert "new_current" in event_data
     assert "available_per_phase" in event_data
     assert "timestamp" in event_data
-    assert "entity_id" in event_data
+    assert "entry_id" in event_data
 
 
 @pytest.mark.asyncio
@@ -422,7 +422,8 @@ async def test_capacity_warning_event_not_fired_when_already_on(hass, full_confi
 async def test_capacity_warning_re_fire_cycle(hass, full_config_entry):
     """EVENT_CAPACITY_WARNING ska skickas vid on→off→on-cykel.
 
-    Cykeln: varning on → kapacitet återställd (no event) → varning on igen (event).
+    Cykeln: off→on (event active=True) → on→off (event active=False) → off→on (event active=True).
+    Totalt 3 events skickas.
     """
     with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
         mock_debouncer_cls.return_value = MagicMock()
@@ -445,23 +446,23 @@ async def test_capacity_warning_re_fire_cycle(hass, full_config_entry):
 
     coordinator._fire_event = counting_fire  # type: ignore[method-assign]
 
-    # Beräkning 1: kapacitetsbrist (off→on)
+    # Beräkning 1: kapacitetsbrist (off→on, event active=True)
     _setup_sensor_states(hass, l1="20.1", l2="20.1", l3="20.1")
     await coordinator._async_calculate()
     assert coordinator._last_capacity_warning is True
     assert fire_call_counts[EVENT_CAPACITY_WARNING] == 1
 
-    # Beräkning 2: kapacitet återställd (on→off, inget event)
+    # Beräkning 2: kapacitet återställd (on→off, event active=False)
     _setup_sensor_states(hass, l1="5.0", l2="5.0", l3="5.0")
     await coordinator._async_calculate()
     assert coordinator._last_capacity_warning is False
-    assert fire_call_counts[EVENT_CAPACITY_WARNING] == 1  # Fortfarande 1
+    assert fire_call_counts[EVENT_CAPACITY_WARNING] == 2  # on→off skickar event
 
     # Beräkning 3: kapacitetsbrist igen (off→on, event skickas igen)
     _setup_sensor_states(hass, l1="20.1", l2="20.1", l3="20.1")
     await coordinator._async_calculate()
     assert coordinator._last_capacity_warning is True
-    assert fire_call_counts[EVENT_CAPACITY_WARNING] == 2  # Nu 2
+    assert fire_call_counts[EVENT_CAPACITY_WARNING] == 3  # Nu 3
 
 
 # ---------------------------------------------------------------------------
@@ -487,7 +488,7 @@ def test_event_sensor_lost_fires_via_hook(full_config_entry):
     assert event_data["sensor_entity"] == "sensor.current_l1"
     assert event_data["action_taken"] == "failsafe_reduce"
     assert "timestamp" in event_data
-    assert "entity_id" in event_data
+    assert "entry_id" in event_data
 
 
 def test_event_sensor_lost_logged_at_warning(full_config_entry, caplog):
@@ -528,7 +529,7 @@ def test_event_failsafe_activated_fires_via_hook(full_config_entry):
     assert event_data["action"] == "total_pause"
     assert "sensors_status" in event_data
     assert "timestamp" in event_data
-    assert "entity_id" in event_data
+    assert "entry_id" in event_data
 
 
 def test_event_failsafe_activated_logged_at_error(full_config_entry, caplog):
@@ -572,7 +573,7 @@ def test_event_phase_switched_fires_via_hook(full_config_entry):
     assert event_data["reason"] == "low_load"
     assert event_data["available_per_phase"] == [18.0, 20.0, 17.0]
     assert "timestamp" in event_data
-    assert "entity_id" in event_data
+    assert "entry_id" in event_data
 
 
 def test_event_phase_switched_logged_at_info(full_config_entry, caplog):
@@ -591,20 +592,20 @@ def test_event_phase_switched_logged_at_info(full_config_entry, caplog):
 
 
 # ---------------------------------------------------------------------------
-# Event-data: entity_id och timestamp format
+# Event-data: entry_id och timestamp format
 # ---------------------------------------------------------------------------
 
 
-def test_fire_event_includes_entity_id(full_config_entry):
-    """_fire_event ska inkludera entity_id i event-data."""
+def test_fire_event_includes_entry_id(full_config_entry):
+    """_fire_event ska inkludera entry_id i event-data."""
     coordinator = _make_coordinator(full_config_entry)
 
     coordinator._fire_event("test_event", {"key": "value"})
 
     call_args = coordinator.hass.bus.async_fire.call_args
     event_data = call_args[0][1]
-    assert "entity_id" in event_data
-    assert DOMAIN in event_data["entity_id"]
+    assert "entry_id" in event_data
+    assert event_data["entry_id"] == full_config_entry.entry_id
 
 
 def test_fire_event_includes_timestamp(full_config_entry):
@@ -623,7 +624,7 @@ def test_fire_event_includes_timestamp(full_config_entry):
 
 
 def test_fire_event_merges_data(full_config_entry):
-    """_fire_event ska slå ihop given data med entity_id och timestamp."""
+    """_fire_event ska slå ihop given data med entry_id och timestamp."""
     coordinator = _make_coordinator(full_config_entry)
 
     coordinator._fire_event("test_event", {"custom_key": "custom_value", "number": 42})
@@ -632,7 +633,7 @@ def test_fire_event_merges_data(full_config_entry):
     event_data = call_args[0][1]
     assert event_data["custom_key"] == "custom_value"
     assert event_data["number"] == 42
-    assert "entity_id" in event_data
+    assert "entry_id" in event_data
     assert "timestamp" in event_data
 
 

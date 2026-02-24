@@ -42,7 +42,15 @@ async def async_setup_entry(
 
     Hämtar koordinatorn från hass.data och registrerar kapacitetsvarnings-sensorn.
     """
-    coordinator: EVLoadBalancerCoordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
+    domain_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+    coordinator = domain_data.get("coordinator")
+    if coordinator is None:
+        _LOGGER.error(
+            "binary_sensor: koordinatorn hittades inte för entry_id=%s — "
+            "sensor-plattformen kanske inte är initialiserad ännu",
+            entry.entry_id,
+        )
+        return
 
     async_add_entities(
         [
@@ -111,12 +119,20 @@ class EVLoadBalancerCapacityWarning(BinarySensorEntity):
         """Läs kapacitetsvarnings-tröskel med options > data > default-prioritering."""
         opts = self._coordinator.entry.options
         data = self._coordinator.entry.data
-        return int(
-            opts.get(
-                CONF_CAPACITY_WARNING_THRESHOLD,
-                data.get(CONF_CAPACITY_WARNING_THRESHOLD, DEFAULT_CAPACITY_WARNING_THRESHOLD),
-            )
+        raw = opts.get(
+            CONF_CAPACITY_WARNING_THRESHOLD,
+            data.get(CONF_CAPACITY_WARNING_THRESHOLD, DEFAULT_CAPACITY_WARNING_THRESHOLD),
         )
+        try:
+            return int(raw)
+        except (ValueError, TypeError):
+            _LOGGER.warning(
+                "Ogiltigt värde för %s: %r — faller tillbaka till default %sA",
+                CONF_CAPACITY_WARNING_THRESHOLD,
+                raw,
+                DEFAULT_CAPACITY_WARNING_THRESHOLD,
+            )
+            return DEFAULT_CAPACITY_WARNING_THRESHOLD
 
     async def async_added_to_hass(self) -> None:
         """Registrera lyssnare och cleanup-callback när sensorn läggs till i HA."""
