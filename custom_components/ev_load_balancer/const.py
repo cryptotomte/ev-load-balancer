@@ -45,6 +45,17 @@ CONF_PHASE_COUNT = "phase_count"
 COOLDOWN_SECONDS = 5.0
 """Cooldown i sekunder för uppåtreglering (Debouncer trailing edge)."""
 
+# --- Hysteres-konstanter (PR-04) ---
+
+PAUSE_DELAY_SECONDS = 15.0
+"""Antal sekunder under min_current innan PAUSE skickas."""
+
+RESUME_DELAY_SECONDS = 30.0
+"""Antal sekunder över resume_threshold innan RESUME skickas."""
+
+RESUME_THRESHOLD_OFFSET = 2
+"""Offset i ampere ovanför min_current för att trigga resume (hysteres)."""
+
 # Suffix för sensor-entitets-ID:n
 SENSOR_STATUS = "status"
 """Status-sensorns entitets-ID suffix."""

@@ -31,8 +31,10 @@ from homeassistant.helpers.debounce import Debouncer
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_state_change_event
+from homeassistant.util.dt import utcnow
 
 from .calculator import CalculationResult, calculate
+from .command_dispatcher import CommandDispatcher
 from .const import (
     CONF_CHARGER_ENTITIES,
     CONF_MAX_CURRENT,
@@ -45,6 +47,9 @@ from .const import (
     DEFAULT_MIN_CURRENT,
     DEFAULT_SAFETY_MARGIN,
     DOMAIN,
+    PAUSE_DELAY_SECONDS,
+    RESUME_DELAY_SECONDS,
+    RESUME_THRESHOLD_OFFSET,
     SENSOR_AVAILABLE_L1,
     SENSOR_AVAILABLE_L2,
     SENSOR_AVAILABLE_L3,
@@ -52,6 +57,7 @@ from .const import (
     SENSOR_STATUS,
     SENSOR_TARGET_CURRENT,
 )
+from .hysteresis import HysteresisAction, HysteresisController
 from .state_machine import BalancerState, LoadBalancerStateMachine
 
 _LOGGER = logging.getLogger(__name__)
@@ -129,6 +135,21 @@ class EVLoadBalancerCoordinator:
         self._current_target: int = self._min_current
         self._pause_reason: str | None = None
 
+        # Senast bekräftad laddström (används av hysteres-kontrollern)
+        self._last_sent_amp: int = self._min_current
+
+        # Hysteres-kontroller (PR-04)
+        self._hysteresis = HysteresisController(
+            min_current=self._min_current,
+            resume_threshold_offset=RESUME_THRESHOLD_OFFSET,
+            pause_delay=PAUSE_DELAY_SECONDS,
+            resume_delay=RESUME_DELAY_SECONDS,
+            cooldown=COOLDOWN_SECONDS,
+        )
+
+        # Kommando-dispatcher (PR-04)
+        self._dispatcher = CommandDispatcher(hass, self._charger_entities)
+
         # Lyssnarlista för sensor-callbacks
         self._notify_listeners: list[Callable] = []
 
@@ -153,6 +174,11 @@ class EVLoadBalancerCoordinator:
     def pause_reason(self) -> str | None:
         """Returnerar orsak till PAUSED-tillstånd, eller None."""
         return self._pause_reason
+
+    @property
+    def last_sent_amp(self) -> int:
+        """Returnerar senast bekräftad laddström i ampere."""
+        return self._last_sent_amp
 
     def register_listener(self, callback_fn: Callable) -> None:
         """Registrera en sensor-lyssnare som anropas vid uppdateringar."""
@@ -329,13 +355,18 @@ class EVLoadBalancerCoordinator:
         return list(range(1, len(self._phases) + 1))
 
     async def _async_calculate(self) -> None:
-        """Asynkron beräkning — läser HA-state, kör calculator, uppdaterar state.
+        """Asynkron beräkning — läser HA-state, kör calculator, skickar kommandon.
 
-        Kallar record_successful_calculation() BARA om INGA fassensorer
-        har state unavailable eller unknown (FR-002/C1).
-
-        Hanterar bilstatus för IDLE/BALANCING-övergångar.
-        Hanterar kapacitetsbrist för BALANCING/PAUSED-övergångar.
+        Flöde:
+        1. Läser fassensorvärden — avbryter om unavailable/unknown (FR-002/C1).
+        2. Läser enhetsvärden (nrg_4/5/6) och aktiva faser (map).
+        3. Kör calculate() för att beräkna available_* och target_current.
+        4. Registrerar lyckad beräkning via state machine (INITIALIZING → IDLE efter 2 st).
+        5. Hanterar bilstatus för IDLE/BALANCING-övergångar (car_value).
+        6. I BALANCING eller PAUSED: utvärderar hysteres-kontrollern (PR-04) och
+           skickar kommandon via CommandDispatcher. Uppdaterar _last_sent_amp och
+           anropar record_amp_change() endast om dispatchen lyckades (bool True).
+        7. Notifierar alla registrerade sensorlyssnare.
         """
         if not self._phases:
             _LOGGER.warning("Inga fassensorer konfigurerade — beräkning avbryts")
@@ -421,27 +452,66 @@ class EVLoadBalancerCoordinator:
         # Hantera bilstatus → IDLE/BALANCING-övergångar
         self._handle_car_status()
 
-        # Hantera kapacitetsbrist → BALANCING/PAUSED-övergångar (US4)
+        # Hantera kapacitetsbrist/reglering via hysteres (PR-04)
         current_sm_state = self._state_machine.state
-        if current_sm_state == BalancerState.BALANCING:
-            if result.available_min < self._min_current:
-                # Kapacitetsbrist (oklämd available_min < min) — övergå till PAUSED
-                self._state_machine.on_below_min_current()
-                self._pause_reason = "below_min_current"
-                _LOGGER.info(
-                    "Tillståndsändring: BALANCING → PAUSED (available_min=%.1fA < min=%sA)",
-                    result.available_min,
-                    self._min_current,
-                )
-        elif current_sm_state == BalancerState.PAUSED:
-            if result.available_min >= self._min_current:
-                # Kapacitet åter (available_min >= min) — återgå till BALANCING
-                self._state_machine.on_above_min_current()
-                self._pause_reason = None
-                _LOGGER.info(
-                    "Tillståndsändring: PAUSED → BALANCING (available_min=%.1fA >= min=%sA)",
-                    result.available_min,
-                    self._min_current,
+        if current_sm_state in (BalancerState.BALANCING, BalancerState.PAUSED):
+            is_paused = current_sm_state == BalancerState.PAUSED
+            now = utcnow()
+
+            cmd = self._hysteresis.evaluate(
+                available_min=result.available_min,
+                target_current=result.target_current,
+                last_sent_amp=self._last_sent_amp,
+                is_paused=is_paused,
+                now=now,
+            )
+
+            if cmd.action == HysteresisAction.SET_AMP:
+                # Reglera laddström (upp eller ned)
+                old_amp = self._last_sent_amp
+                direction = "sänkt" if cmd.amp < old_amp else "höjd"
+                sent = await self._dispatcher.send_amp(cmd.amp)
+                if sent:
+                    self._last_sent_amp = cmd.amp
+                    self._hysteresis.record_amp_change(now)
+                    _LOGGER.info(
+                        "Ström %s: %sA → %sA (%s)",
+                        direction,
+                        old_amp,
+                        cmd.amp,
+                        cmd.reason,
+                    )
+
+            elif cmd.action == HysteresisAction.PAUSE:
+                # Pausa laddning — övergå till PAUSED
+                paused = await self._dispatcher.pause()
+                if paused:
+                    self._state_machine.on_below_min_current()
+                    self._pause_reason = "insufficient_capacity"
+                    _LOGGER.warning(
+                        "Laddning pausad: %s",
+                        cmd.reason,
+                    )
+
+            elif cmd.action == HysteresisAction.RESUME:
+                # Återuppta laddning — övergå till BALANCING
+                resumed = await self._dispatcher.resume(cmd.amp)
+                if resumed:
+                    self._state_machine.on_above_min_current()
+                    self._pause_reason = None
+                    self._last_sent_amp = cmd.amp
+                    self._hysteresis.record_amp_change(now)
+                    _LOGGER.info(
+                        "Laddning återupptagen: %sA (%s)",
+                        cmd.amp,
+                        cmd.reason,
+                    )
+
+            else:
+                # NONE — ingen åtgärd
+                _LOGGER.debug(
+                    "Hysteres: ingen åtgärd (%s)",
+                    cmd.reason,
                 )
 
         # Notifiera alla sensorlyssnare om uppdatering
@@ -480,6 +550,9 @@ class EVLoadBalancerCoordinator:
             prev = sm_state
             if self._state_machine.on_car_disconnected():
                 self._pause_reason = None
+                # Nollställ hysteres-state och last_sent_amp (T008)
+                self._hysteresis.reset()
+                self._last_sent_amp = self._min_current
                 _LOGGER.info("Tillståndsändring: %s → IDLE (car_value='Idle')", prev)
 
 
@@ -529,7 +602,7 @@ class BalancerStatusSensor(_EVSensorBase):
     """Sensor som visar lastbalanserarens aktuella tillstånd.
 
     Värde: BalancerState-sträng (initializing/idle/balancing/paused)
-    Extra attribut: 9 stycken per FR-019
+    Extra attribut: 10 stycken per FR-019
     """
 
     _attr_translation_key = SENSOR_STATUS
@@ -547,7 +620,7 @@ class BalancerStatusSensor(_EVSensorBase):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Returnerar alla 9 status-attribut (FR-019)."""
+        """Returnerar alla 10 status-attribut (FR-019)."""
         result = self._coordinator.last_result
         entry = self._coordinator.entry
         opts = entry.options
@@ -569,6 +642,7 @@ class BalancerStatusSensor(_EVSensorBase):
             "charging_mode": result.charging_mode if result else None,
             "safety_margin": safety_margin,
             "charger_profile": profile_id,
+            "last_sent_amp": self._coordinator.last_sent_amp,
         }
 
 
