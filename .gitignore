@@ -1,17 +1,21 @@
-# Utvecklingsflöde (internt)
+# Internal development workflow
 CLAUDE.md
 .claude/
 .specify/
 specs/
-docs/
+
+# Docs: ignore everything except public charger-profiles
+docs/*
+!docs/charger-profiles/
 
 # Python
 .venv/
 __pycache__/
 *.py[cod]
 *.egg-info/
+uv.lock
 
-# Verktyg (genererat)
+# Tool caches
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/

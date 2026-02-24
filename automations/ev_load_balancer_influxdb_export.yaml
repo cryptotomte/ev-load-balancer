@@ -1,0 +1,76 @@
+# EV Load Balancer — InfluxDB Export Automations
+#
+# Import this file in Home Assistant to export load balancing
+# events to InfluxDB for historical analysis in Grafana.
+#
+# Prerequisite: InfluxDB integration is configured in HA.
+# Measurement: ev_load_balancer_events
+#
+# Event types exported:
+#   - ev_load_balancer_current_adjusted  (current adjustment)
+#   - ev_load_balancer_device_paused     (pause)
+#   - ev_load_balancer_device_resumed    (resume)
+#   - ev_load_balancer_phase_switched    (phase switching)
+#
+# Compatible with EV Load Balancer v0.1.0+ (PR-07 event format)
+
+automation:
+  - alias: "EV Load Balancer → InfluxDB Export (current adjustment)"
+    description: "Writes current adjustment events to InfluxDB measurement ev_load_balancer_events"
+    trigger:
+      - platform: event
+        event_type: ev_load_balancer_current_adjusted
+    action:
+      - service: influxdb.write
+        data:
+          measurement: ev_load_balancer_events
+          tags:
+            event_type: "current_adjusted"
+            charger_profile: "{{ state_attr('sensor.ev_load_balancer_status', 'charger_profile') }}"
+            state: "{{ states('sensor.ev_load_balancer_status') }}"
+          fields:
+            old_current: "{{ trigger.event.data.old_current | int }}"
+            new_current: "{{ trigger.event.data.new_current | int }}"
+            available: "{{ trigger.event.data.available | float(0) }}"
+            reason: "{{ trigger.event.data.reason | default('unknown') }}"
+          timestamp: "{{ now().isoformat() }}"
+
+  - alias: "EV Load Balancer → InfluxDB Export (pause/resume)"
+    description: "Writes pause and resume events to InfluxDB measurement ev_load_balancer_events"
+    trigger:
+      - platform: event
+        event_type: ev_load_balancer_device_paused
+      - platform: event
+        event_type: ev_load_balancer_device_resumed
+    action:
+      - service: influxdb.write
+        data:
+          measurement: ev_load_balancer_events
+          tags:
+            # Removes the "ev_load_balancer_" prefix: yields "device_paused" or "device_resumed"
+            event_type: "{{ trigger.event.event_type | replace('ev_load_balancer_', '') }}"
+            charger_profile: "{{ state_attr('sensor.ev_load_balancer_status', 'charger_profile') }}"
+            state: "{{ states('sensor.ev_load_balancer_status') }}"
+          fields:
+            reason: "{{ trigger.event.data.reason | default('unknown') }}"
+            # available_min only exists in device_paused — fallback 0.0 for device_resumed
+            available_min: "{{ trigger.event.data.available_min | default(0) | float(0) }}"
+          timestamp: "{{ now().isoformat() }}"
+
+  - alias: "EV Load Balancer → InfluxDB Export (phase switching)"
+    description: "Writes phase switching events to InfluxDB measurement ev_load_balancer_events"
+    trigger:
+      - platform: event
+        event_type: ev_load_balancer_phase_switched
+    action:
+      - service: influxdb.write
+        data:
+          measurement: ev_load_balancer_events
+          tags:
+            event_type: "phase_switched"
+            charger_profile: "{{ state_attr('sensor.ev_load_balancer_status', 'charger_profile') }}"
+          fields:
+            from_mode: "{{ trigger.event.data.from_mode }}"
+            to_mode: "{{ trigger.event.data.to_mode }}"
+            reason: "{{ trigger.event.data.reason | default('unknown') }}"
+          timestamp: "{{ now().isoformat() }}"
