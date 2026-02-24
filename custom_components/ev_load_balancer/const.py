@@ -56,6 +56,17 @@ RESUME_DELAY_SECONDS = 30.0
 RESUME_THRESHOLD_OFFSET = 2
 """Offset i ampere ovanför min_current för att trigga resume (hysteres)."""
 
+# --- Fasväxlings-konstanter (PR-06) ---
+
+PHASE_SWITCH_UPSCALE_DELAY = 60
+"""Sekunder med alla faser >= min_current innan uppväxling 1→3 fas sker."""
+
+PSM_VALUE_1PHASE = "1"
+"""PSM select-värde för 1-fas laddning."""
+
+PSM_VALUE_3PHASE = "2"
+"""PSM select-värde för 3-fas laddning."""
+
 # Suffix för sensor-entitets-ID:n
 SENSOR_STATUS = "status"
 """Status-sensorns entitets-ID suffix."""
