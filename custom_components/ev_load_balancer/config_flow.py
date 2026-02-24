@@ -27,18 +27,22 @@ from homeassistant.helpers.selector import (
 
 from .charger_profiles import PROFILES
 from .const import (
+    CONF_ACTION_ON_SENSOR_LOSS,
     CONF_CHARGER_ENTITIES,
     CONF_MAX_CURRENT,
     CONF_MIN_CURRENT,
     CONF_PHASE_COUNT,
     CONF_PHASES,
     CONF_PROFILE_ID,
+    CONF_SAFE_DEFAULT_CURRENT,
     CONF_SAFETY_MARGIN,
     CONF_SERIAL,
     DEFAULT_MAX_CURRENT,
     DEFAULT_MIN_CURRENT,
     DEFAULT_PHASE_COUNT,
+    DEFAULT_SAFE_CURRENT,
     DEFAULT_SAFETY_MARGIN,
+    DEFAULT_SENSOR_LOSS_ACTION,
     DOMAIN,
 )
 
@@ -507,7 +511,7 @@ class EVLoadBalancerOptionsFlow(OptionsFlow):
         )
 
     async def async_step_params(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        """Steg 5: Ändra beräkningsparametrar."""
+        """Steg 5: Ändra beräkningsparametrar och failsafe-inställningar (PR-05)."""
         errors: dict[str, str] = {}
 
         # Pre-fill från befintliga options eller data
@@ -529,6 +533,8 @@ class EVLoadBalancerOptionsFlow(OptionsFlow):
                         CONF_MIN_CURRENT: min_c,
                         CONF_MAX_CURRENT: max_c,
                         CONF_PHASE_COUNT: user_input[CONF_PHASE_COUNT],
+                        CONF_ACTION_ON_SENSOR_LOSS: user_input[CONF_ACTION_ON_SENSOR_LOSS],
+                        CONF_SAFE_DEFAULT_CURRENT: int(user_input[CONF_SAFE_DEFAULT_CURRENT]),
                     }
                 )
 
@@ -548,6 +554,14 @@ class EVLoadBalancerOptionsFlow(OptionsFlow):
         default_phase_count = existing_options.get(
             CONF_PHASE_COUNT,
             existing_data.get(CONF_PHASE_COUNT, DEFAULT_PHASE_COUNT),
+        )
+        default_action = existing_options.get(
+            CONF_ACTION_ON_SENSOR_LOSS,
+            existing_data.get(CONF_ACTION_ON_SENSOR_LOSS, DEFAULT_SENSOR_LOSS_ACTION),
+        )
+        default_safe_current = existing_options.get(
+            CONF_SAFE_DEFAULT_CURRENT,
+            existing_data.get(CONF_SAFE_DEFAULT_CURRENT, DEFAULT_SAFE_CURRENT),
         )
 
         schema = vol.Schema(
@@ -596,6 +610,28 @@ class EVLoadBalancerOptionsFlow(OptionsFlow):
                         options=["auto", "1", "3"],
                         mode=SelectSelectorMode.DROPDOWN,
                         translation_key="phase_count",
+                    )
+                ),
+                vol.Required(
+                    CONF_ACTION_ON_SENSOR_LOSS,
+                    default=default_action,
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=["reduce", "pause"],
+                        mode=SelectSelectorMode.DROPDOWN,
+                        translation_key="action_on_sensor_loss",
+                    )
+                ),
+                vol.Required(
+                    CONF_SAFE_DEFAULT_CURRENT,
+                    default=default_safe_current,
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=6,
+                        max=16,
+                        step=1,
+                        unit_of_measurement="A",
+                        mode=NumberSelectorMode.BOX,
                     )
                 ),
             }

@@ -16,6 +16,7 @@ class BalancerState(StrEnum):
     IDLE = "idle"
     BALANCING = "balancing"
     PAUSED = "paused"
+    FAILSAFE = "failsafe"
 
 
 # Minsta antal lyckade beräkningar för övergång från INITIALIZING till IDLE
@@ -34,17 +35,25 @@ class LoadBalancerStateMachine:
         BALANCING    → IDLE       : bil bortkopplad (car_value == "Idle")
         BALANCING    → PAUSED     : target_current < min_current
         PAUSED       → BALANCING  : target_current >= min_current
+        IDLE/BALANCING/PAUSED → FAILSAFE : sensorförlust detekterad
+        FAILSAFE → föregående     : alla sensorer tillgängliga igen
     """
 
     def __init__(self) -> None:
         """Initialisera state machine i INITIALIZING."""
         self._state = BalancerState.INITIALIZING
         self._successful_calculations = 0
+        self._previous_state: BalancerState | None = None
 
     @property
     def state(self) -> BalancerState:
         """Returnerar aktuellt tillstånd."""
         return self._state
+
+    @property
+    def previous_state(self) -> BalancerState | None:
+        """Returnerar tillståndet innan FAILSAFE, eller None om ej i FAILSAFE."""
+        return self._previous_state
 
     def record_successful_calculation(self) -> bool:
         """Registrera en lyckad beräkning (alla sensorer tillgängliga).
@@ -147,3 +156,42 @@ class LoadBalancerStateMachine:
             return True
         # Redan BALANCING — ignorera
         return False
+
+    def enter_failsafe(self, previous_state: BalancerState) -> None:
+        """Övergå till FAILSAFE-tillstånd och spara föregående tillstånd.
+
+        Anropas när sensorförlust detekteras. Sparar previous_state för
+        att möjliggöra automatisk återhämtning.
+
+        Args:
+            previous_state: Tillståndet innan FAILSAFE (för återhämtning).
+
+        Raises:
+            ValueError: Om anropad i INITIALIZING (ogiltigt att failsafe:a under init).
+        """
+        if self._state == BalancerState.INITIALIZING:
+            raise ValueError(
+                "Ogiltig övergång: enter_failsafe() kan inte anropas i tillstånd INITIALIZING"
+            )
+        self._previous_state = previous_state
+        self._state = BalancerState.FAILSAFE
+
+    def recover_from_failsafe(self) -> bool:
+        """Återgå till föregående tillstånd från FAILSAFE.
+
+        Anropas när alla sensorer är tillgängliga igen. Återställer
+        state till det sparade previous_state.
+
+        Returns:
+            True om återhämtning lyckades (state ändrades), annars False.
+        """
+        if self._state != BalancerState.FAILSAFE:
+            # Inte i FAILSAFE — ignorera
+            return False
+        if self._previous_state is None:
+            # Inget föregående tillstånd sparat — återgå till IDLE som fallback
+            self._state = BalancerState.IDLE
+            return True
+        self._state = self._previous_state
+        self._previous_state = None
+        return True

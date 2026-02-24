@@ -294,3 +294,162 @@ def test_full_lifecycle():
     # Bil kopplas bort → IDLE
     sm.on_car_disconnected()
     assert sm.state == BalancerState.IDLE
+
+
+# ---------------------------------------------------------------------------
+# FAILSAFE-tillstånd (PR-05)
+# ---------------------------------------------------------------------------
+
+
+def test_failsafe_state_string():
+    """BalancerState.FAILSAFE ska ha strängvärdet 'failsafe'."""
+    assert BalancerState.FAILSAFE == "failsafe"
+
+
+def test_enter_failsafe_from_idle():
+    """IDLE → FAILSAFE via enter_failsafe(), previous_state sparas som IDLE."""
+    sm = LoadBalancerStateMachine()
+    sm.record_successful_calculation()
+    sm.record_successful_calculation()
+    assert sm.state == BalancerState.IDLE
+
+    sm.enter_failsafe(BalancerState.IDLE)
+    assert sm.state == BalancerState.FAILSAFE
+    assert sm.previous_state == BalancerState.IDLE
+
+
+def test_enter_failsafe_from_balancing():
+    """BALANCING → FAILSAFE via enter_failsafe(), previous_state sparas som BALANCING."""
+    sm = LoadBalancerStateMachine()
+    sm.record_successful_calculation()
+    sm.record_successful_calculation()
+    sm.on_car_connected()
+    assert sm.state == BalancerState.BALANCING
+
+    sm.enter_failsafe(BalancerState.BALANCING)
+    assert sm.state == BalancerState.FAILSAFE
+    assert sm.previous_state == BalancerState.BALANCING
+
+
+def test_enter_failsafe_from_paused():
+    """PAUSED → FAILSAFE via enter_failsafe(), previous_state sparas som PAUSED."""
+    sm = LoadBalancerStateMachine()
+    sm.record_successful_calculation()
+    sm.record_successful_calculation()
+    sm.on_car_connected()
+    sm.on_below_min_current()
+    assert sm.state == BalancerState.PAUSED
+
+    sm.enter_failsafe(BalancerState.PAUSED)
+    assert sm.state == BalancerState.FAILSAFE
+    assert sm.previous_state == BalancerState.PAUSED
+
+
+def test_enter_failsafe_from_initializing_raises_error():
+    """enter_failsafe() från INITIALIZING ska kasta ValueError."""
+    sm = LoadBalancerStateMachine()
+    assert sm.state == BalancerState.INITIALIZING
+
+    with pytest.raises(ValueError):
+        sm.enter_failsafe(BalancerState.INITIALIZING)
+
+
+def test_recover_from_failsafe_to_idle():
+    """FAILSAFE → IDLE via recover_from_failsafe() när previous_state är IDLE."""
+    sm = LoadBalancerStateMachine()
+    sm.record_successful_calculation()
+    sm.record_successful_calculation()
+    sm.enter_failsafe(BalancerState.IDLE)
+    assert sm.state == BalancerState.FAILSAFE
+
+    result = sm.recover_from_failsafe()
+    assert result is True
+    assert sm.state == BalancerState.IDLE
+    assert sm.previous_state is None
+
+
+def test_recover_from_failsafe_to_balancing():
+    """FAILSAFE → BALANCING via recover_from_failsafe() när previous_state är BALANCING."""
+    sm = LoadBalancerStateMachine()
+    sm.record_successful_calculation()
+    sm.record_successful_calculation()
+    sm.on_car_connected()
+    sm.enter_failsafe(BalancerState.BALANCING)
+    assert sm.state == BalancerState.FAILSAFE
+
+    result = sm.recover_from_failsafe()
+    assert result is True
+    assert sm.state == BalancerState.BALANCING
+
+
+def test_recover_from_failsafe_to_paused():
+    """FAILSAFE → PAUSED via recover_from_failsafe() när previous_state är PAUSED."""
+    sm = LoadBalancerStateMachine()
+    sm.record_successful_calculation()
+    sm.record_successful_calculation()
+    sm.on_car_connected()
+    sm.on_below_min_current()
+    sm.enter_failsafe(BalancerState.PAUSED)
+    assert sm.state == BalancerState.FAILSAFE
+
+    result = sm.recover_from_failsafe()
+    assert result is True
+    assert sm.state == BalancerState.PAUSED
+
+
+def test_recover_from_failsafe_when_not_in_failsafe_returns_false():
+    """recover_from_failsafe() utanför FAILSAFE ska returnera False."""
+    sm = LoadBalancerStateMachine()
+    sm.record_successful_calculation()
+    sm.record_successful_calculation()
+    assert sm.state == BalancerState.IDLE
+
+    result = sm.recover_from_failsafe()
+    assert result is False
+    assert sm.state == BalancerState.IDLE
+
+
+def test_previous_state_is_none_initially():
+    """previous_state ska vara None vid start."""
+    sm = LoadBalancerStateMachine()
+    assert sm.previous_state is None
+
+
+def test_previous_state_cleared_after_recovery():
+    """previous_state ska rensas efter recover_from_failsafe()."""
+    sm = LoadBalancerStateMachine()
+    sm.record_successful_calculation()
+    sm.record_successful_calculation()
+    sm.enter_failsafe(BalancerState.IDLE)
+
+    sm.recover_from_failsafe()
+    assert sm.previous_state is None
+
+
+def test_failsafe_full_cycle_idle():
+    """Komplett FAILSAFE-cykel: IDLE → FAILSAFE → IDLE."""
+    sm = LoadBalancerStateMachine()
+    sm.record_successful_calculation()
+    sm.record_successful_calculation()
+    assert sm.state == BalancerState.IDLE
+
+    sm.enter_failsafe(BalancerState.IDLE)
+    assert sm.state == BalancerState.FAILSAFE
+
+    sm.recover_from_failsafe()
+    assert sm.state == BalancerState.IDLE
+
+
+def test_failsafe_full_cycle_balancing():
+    """Komplett FAILSAFE-cykel: BALANCING → FAILSAFE → BALANCING."""
+    sm = LoadBalancerStateMachine()
+    sm.record_successful_calculation()
+    sm.record_successful_calculation()
+    sm.on_car_connected()
+    assert sm.state == BalancerState.BALANCING
+
+    sm.enter_failsafe(BalancerState.BALANCING)
+    assert sm.state == BalancerState.FAILSAFE
+
+    sm.recover_from_failsafe()
+    assert sm.state == BalancerState.BALANCING

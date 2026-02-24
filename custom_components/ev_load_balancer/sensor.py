@@ -36,16 +36,20 @@ from homeassistant.util.dt import utcnow
 from .calculator import CalculationResult, calculate
 from .command_dispatcher import CommandDispatcher
 from .const import (
+    CONF_ACTION_ON_SENSOR_LOSS,
     CONF_CHARGER_ENTITIES,
     CONF_MAX_CURRENT,
     CONF_MIN_CURRENT,
     CONF_PHASES,
     CONF_PROFILE_ID,
+    CONF_SAFE_DEFAULT_CURRENT,
     CONF_SAFETY_MARGIN,
     COOLDOWN_SECONDS,
     DEFAULT_MAX_CURRENT,
     DEFAULT_MIN_CURRENT,
+    DEFAULT_SAFE_CURRENT,
     DEFAULT_SAFETY_MARGIN,
+    DEFAULT_SENSOR_LOSS_ACTION,
     DOMAIN,
     PAUSE_DELAY_SECONDS,
     RESUME_DELAY_SECONDS,
@@ -128,6 +132,18 @@ class EVLoadBalancerCoordinator:
             opts.get(CONF_MAX_CURRENT, data.get(CONF_MAX_CURRENT, DEFAULT_MAX_CURRENT))
         )
         self._profile_id: str = data.get(CONF_PROFILE_ID, "generic")
+
+        # Failsafe-konfiguration (PR-05), options > data-prioritering
+        self._action_on_sensor_loss: str = opts.get(
+            CONF_ACTION_ON_SENSOR_LOSS,
+            data.get(CONF_ACTION_ON_SENSOR_LOSS, DEFAULT_SENSOR_LOSS_ACTION),
+        )
+        self._safe_default_current: int = int(
+            opts.get(
+                CONF_SAFE_DEFAULT_CURRENT,
+                data.get(CONF_SAFE_DEFAULT_CURRENT, DEFAULT_SAFE_CURRENT),
+            )
+        )
 
         # State machine och senaste beräkningsresultat
         self._state_machine = LoadBalancerStateMachine()
@@ -243,10 +259,41 @@ class EVLoadBalancerCoordinator:
         Synkron callback (körs i event loop).
 
         Logik:
+        - Kontrollera om en bevakad fassensor blivit unavailable → failsafe
+        - Kontrollera om alla fassensorer är tillgängliga igen → återhämtning
         - Beräkna preview (snabb synkron förhandsberäkning)
         - Om preview < current_target: nedreglering → avbryt debouncer + direkt task
         - Annars: uppåtreglering → schemalägg via debouncer (cooldown 5s)
         """
+        # Hämta entitets-ID:n för ändrade sensorer
+        entity_id = event.data.get("entity_id", "")
+        new_state = event.data.get("new_state")
+
+        # Bygg lista med fas-sensor-ID:n
+        phase_sensor_ids = {
+            phase.get("sensor", "") for phase in self._phases if phase.get("sensor", "")
+        }
+
+        # Kontrollera om en fassensor ändrade status
+        if entity_id in phase_sensor_ids:
+            if new_state is not None and new_state.state == "unavailable":
+                # Fassensor blev unavailable — kontrollera om alla är borta eller bara en
+                self._debouncer.async_cancel()
+                self.hass.async_create_task(self._async_handle_sensor_unavailable())
+                return
+
+            if new_state is not None and new_state.state not in ("unavailable", "unknown"):
+                # En fassensor blev tillgänglig igen — kontrollera om vi är i FAILSAFE
+                if self._state_machine.state == BalancerState.FAILSAFE:
+                    self._debouncer.async_cancel()
+                    self.hass.async_create_task(self._async_check_recovery())
+                    return
+
+        # Normal logik: preview-beräkning för nedreglering/uppåtreglering
+        # Hoppa över om vi är i FAILSAFE (ingen normal beräkning under failsafe)
+        if self._state_machine.state == BalancerState.FAILSAFE:
+            return
+
         preview = self._calculate_preview()
 
         if preview is not None and preview < self._current_target:
@@ -261,6 +308,95 @@ class EVLoadBalancerCoordinator:
         else:
             # Uppåtreglering eller oförändrat: vänta på cooldown (US3)
             self._debouncer.async_schedule_call()
+
+    async def _async_handle_sensor_unavailable(self) -> None:
+        """Hanterar sensorförlust — avgör om total eller enskild, triggar failsafe.
+
+        Räknar unavailable fassensorer och väljer åtgärd:
+        - Alla borta: alltid paus (frc='1'), logga CRITICAL
+        - Enskild: action='reduce' → send_amp(safe_default), action='pause' → pause()
+        """
+        # Räkna unavailable fassensorer
+        unavailable_count = 0
+        total_count = 0
+        for phase in self._phases:
+            sensor_id = phase.get("sensor", "")
+            if not sensor_id:
+                continue
+            total_count += 1
+            state = self.hass.states.get(sensor_id)
+            if state is None or state.state in ("unavailable", "unknown"):
+                unavailable_count += 1
+
+        if unavailable_count == 0:
+            # Ingen sensor unavailable längre — ingenting att göra
+            return
+
+        # Hämta aktuellt state machine-tillstånd INNAN övergång
+        current_sm_state = self._state_machine.state
+
+        # Undvik dubbel-enter av FAILSAFE
+        if current_sm_state == BalancerState.FAILSAFE:
+            return
+
+        if unavailable_count == total_count:
+            # Total sensorförlust — alltid pausa, oavsett konfiguration
+            _LOGGER.critical(
+                "FAILSAFE: Alla %d fassensorer är unavailable — laddning stoppas omedelbart",
+                total_count,
+            )
+            self._state_machine.enter_failsafe(current_sm_state)
+            self._pause_reason = "sensor_unavailable"
+            await self._dispatcher.pause()
+        else:
+            # Enskild sensorförlust — följ konfigurerad action
+            _LOGGER.error(
+                "FAILSAFE: %d av %d fassensorer är unavailable — åtgärd: %s",
+                unavailable_count,
+                total_count,
+                self._action_on_sensor_loss,
+            )
+            self._state_machine.enter_failsafe(current_sm_state)
+            self._pause_reason = "sensor_unavailable"
+
+            if self._action_on_sensor_loss == "pause":
+                await self._dispatcher.pause()
+            else:
+                # Default: reduce till safe_default_current
+                await self._dispatcher.send_amp(self._safe_default_current)
+
+        self._notify_all_listeners()
+
+    async def _async_check_recovery(self) -> None:
+        """Kontrollera om alla fassensorer är tillgängliga igen för återhämtning.
+
+        Anropas när en sensor som var unavailable blir tillgänglig igen.
+        Om alla sensorer nu är OK: anropa recover_from_failsafe() och
+        starta ny beräkningscykel.
+        """
+        if self._state_machine.state != BalancerState.FAILSAFE:
+            return
+
+        # Kontrollera att ALLA fassensorer är tillgängliga
+        for phase in self._phases:
+            sensor_id = phase.get("sensor", "")
+            if not sensor_id:
+                continue
+            state = self.hass.states.get(sensor_id)
+            if state is None or state.state in ("unavailable", "unknown"):
+                # Minst en sensor fortfarande unavailable — vänta
+                return
+
+        # Alla sensorer tillgängliga — återhämtning
+        _LOGGER.info(
+            "FAILSAFE-återhämtning: alla fassensorer tillgängliga igen — återgår till normalt läge"
+        )
+        self._state_machine.recover_from_failsafe()
+        self._pause_reason = None
+        self._notify_all_listeners()
+
+        # Starta beräkningscykel för att återta normal drift
+        self._debouncer.async_schedule_call()
 
     def _calculate_preview(self) -> int | None:
         """Snabb synkron förhandsberäkning baserat på aktuella HA-states.
@@ -311,7 +447,13 @@ class EVLoadBalancerCoordinator:
             return None
 
     def _read_device_values_sync(self) -> list[float]:
-        """Läs laddarens ström per fas synkront (0.0 om saknas)."""
+        """Läs laddarens ström per fas synkront.
+
+        Fallback-logik (PR-05/US3):
+        - Om laddarens nrg-sensor är unavailable: använd _last_sent_amp
+          som fallback-värde och logga WARNING.
+        - Om sensorn saknas helt: använd 0.0A som tidigare.
+        """
         device_values: list[float] = []
         for _, key in zip(self._phases, ("nrg_4", "nrg_5", "nrg_6")):
             entity_id = self._charger_entities.get(key, "")
@@ -327,6 +469,16 @@ class EVLoadBalancerCoordinator:
                             entity_id,
                             state.state,
                         )
+                elif state and state.state in ("unavailable", "unknown"):
+                    # Laddarens sensor unavailable — fallback till senast satta amp-värde
+                    _LOGGER.warning(
+                        "Laddarens sensor '%s' är %s — använder senast satt ström %sA som fallback",
+                        entity_id,
+                        state.state,
+                        self._last_sent_amp,
+                    )
+                    device_values.append(float(self._last_sent_amp))
+                    continue
             device_values.append(0.0)
         return device_values
 
@@ -358,18 +510,25 @@ class EVLoadBalancerCoordinator:
         """Asynkron beräkning — läser HA-state, kör calculator, skickar kommandon.
 
         Flöde:
-        1. Läser fassensorvärden — avbryter om unavailable/unknown (FR-002/C1).
-        2. Läser enhetsvärden (nrg_4/5/6) och aktiva faser (map).
-        3. Kör calculate() för att beräkna available_* och target_current.
-        4. Registrerar lyckad beräkning via state machine (INITIALIZING → IDLE efter 2 st).
-        5. Hanterar bilstatus för IDLE/BALANCING-övergångar (car_value).
-        6. I BALANCING eller PAUSED: utvärderar hysteres-kontrollern (PR-04) och
+        1. Om state är FAILSAFE: hoppa över beräkning (failsafe-logik hanteras separat).
+        2. Läser fassensorvärden — avbryter om unavailable/unknown (FR-002/C1).
+        3. Läser enhetsvärden (nrg_4/5/6) och aktiva faser (map).
+        4. Kör calculate() för att beräkna available_* och target_current.
+        5. Registrerar lyckad beräkning via state machine (INITIALIZING → IDLE efter 2 st).
+        6. Hanterar bilstatus för IDLE/BALANCING-övergångar (car_value).
+        7. I BALANCING eller PAUSED: utvärderar hysteres-kontrollern (PR-04) och
            skickar kommandon via CommandDispatcher. Uppdaterar _last_sent_amp och
            anropar record_amp_change() endast om dispatchen lyckades (bool True).
-        7. Notifierar alla registrerade sensorlyssnare.
+        8. Notifierar alla registrerade sensorlyssnare.
         """
         if not self._phases:
             _LOGGER.warning("Inga fassensorer konfigurerade — beräkning avbryts")
+            return
+
+        # FAILSAFE: hoppa över normal beräkning — failsafe-logik hanteras av
+        # _async_handle_sensor_unavailable() och _async_check_recovery()
+        if self._state_machine.state == BalancerState.FAILSAFE:
+            _LOGGER.debug("Beräkning avbryts: systemet är i FAILSAFE-tillstånd")
             return
 
         # Läs fassensorvärden — kontrollera unavailable
@@ -521,6 +680,7 @@ class EVLoadBalancerCoordinator:
         """Hanterar bilstatus för IDLE/BALANCING-övergångar.
 
         Läser car_value-sensorn och triggar övergångar i state machine.
+        Not: FAILSAFE-tillstånd hanteras inte här (det är en fassensor-händelse).
         """
         car_entity = self._charger_entities.get("car_value", "")
         if not car_entity:
@@ -620,7 +780,10 @@ class BalancerStatusSensor(_EVSensorBase):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Returnerar alla 10 status-attribut (FR-019)."""
+        """Returnerar alla status-attribut (FR-019, FR-012).
+
+        Vid FAILSAFE exponeras paused_reason='sensor_unavailable' (FR-012).
+        """
         result = self._coordinator.last_result
         entry = self._coordinator.entry
         opts = entry.options

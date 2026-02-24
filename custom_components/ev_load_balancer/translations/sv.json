@@ -81,7 +81,9 @@
           "safety_margin": "Säkerhetsmarginal (A)",
           "min_current": "Minsta laddström (A)",
           "max_current": "Högsta laddström (A)",
-          "phase_count": "Fasantal"
+          "phase_count": "Fasantal",
+          "action_on_sensor_loss": "Åtgärd vid sensorförlust",
+          "safe_default_current": "Säker standardström vid sensorförlust (A)"
         }
       }
     },
@@ -89,6 +91,14 @@
       "no_phases": "Minst en fassensor (L1) måste konfigureras.",
       "duplicate_phase_sensors": "Samma sensor kan inte användas för flera faser. Varje fas måste ha en unik strömsensor.",
       "max_less_than_min": "Högsta laddström måste vara minst lika stor som lägsta laddström."
+    }
+  },
+  "selector": {
+    "action_on_sensor_loss": {
+      "options": {
+        "reduce": "Reducera till säker standardström",
+        "pause": "Pausa laddning"
+      }
     }
   }
 }
