@@ -34,6 +34,7 @@ class CommandDispatcher:
         self._hass = hass
         self._amp_entity = charger_entities.get("amp", "")
         self._frc_entity = charger_entities.get("frc", "")
+        self._psm_entity = charger_entities.get("psm", "")
 
     async def send_amp(self, amp: int) -> bool:
         """Skicka ny laddström till laddarens amp-entitet.
@@ -100,6 +101,42 @@ class CommandDispatcher:
                 "Misslyckades att skicka frc='%s' till %s",
                 value,
                 self._frc_entity,
+                exc_info=True,
+            )
+            return False
+
+    async def send_psm(self, value: str) -> bool:
+        """Skicka fasväxlingskommando till laddarens psm-entitet.
+
+        Anropar HA-tjänsten select.select_option med det givna alternativet.
+        PSM-entiteten är ALLTID en select (aldrig number) — Princip III.
+        Loggar ERROR vid misslyckande men propagerar inte undantaget.
+
+        Args:
+            value: Alternativ att välja — "1" (1-fas) eller "2" (3-fas).
+                   Använd PSM_VALUE_1PHASE och PSM_VALUE_3PHASE från const.py.
+
+        Returns:
+            True om kommandot skickades utan fel, annars False.
+        """
+        if not self._psm_entity:
+            _LOGGER.warning("Ingen psm-entitet konfigurerad — kan inte skicka psm='%s'", value)
+            return False
+
+        try:
+            await self._hass.services.async_call(
+                "select",
+                "select_option",
+                {"entity_id": self._psm_entity, "option": value},
+                blocking=False,
+            )
+            _LOGGER.debug("Skickade psm='%s' till %s", value, self._psm_entity)
+            return True
+        except Exception:
+            _LOGGER.error(
+                "Misslyckades att skicka psm='%s' till %s",
+                value,
+                self._psm_entity,
                 exc_info=True,
             )
             return False

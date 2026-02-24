@@ -46,6 +46,11 @@ class CalculationResult:
     charging_mode: str
     """Laddningsläge: '1-phase' eller '3-phase'."""
 
+    available_per_phase: dict[str, float] = field(default_factory=dict)
+    """Tillgänglig ström per fas som dict: {"l1": float, "l2": float, "l3": float}.
+    Används av PhaseSwitcher för att avgöra om fasväxling är möjlig.
+    """
+
     calculation_time: datetime = field(default_factory=datetime.now)
     """Tidpunkt för beräkning."""
 
@@ -124,4 +129,9 @@ def calculate(
         phase_loads=list(phase_values[:n]),
         device_loads=list(device_values[:n]),
         charging_mode=charging_mode,
+        available_per_phase={
+            "l1": available[0],
+            "l2": available[1],
+            "l3": available[2],
+        },
     )

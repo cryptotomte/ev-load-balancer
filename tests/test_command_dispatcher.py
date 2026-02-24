@@ -23,6 +23,7 @@ from custom_components.ev_load_balancer.command_dispatcher import CommandDispatc
 CHARGER_ENTITIES = {
     "amp": "number.goe_409787_amp",
     "frc": "select.goe_409787_frc",
+    "psm": "select.goe_409787_psm",
 }
 
 
@@ -269,3 +270,68 @@ async def test_send_frc_without_entity_logs_warning(mock_hass):
         mock_logger.warning.assert_called_once()
 
     mock_hass.services.async_call.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# send_psm (PR-06)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_send_psm_1phase_calls_select_option(dispatcher, mock_hass):
+    """send_psm('1') ska anropa select.select_option med psm-entitet och option='1'."""
+    result = await dispatcher.send_psm("1")
+
+    assert result is True
+    mock_hass.services.async_call.assert_called_once_with(
+        "select",
+        "select_option",
+        {"entity_id": "select.goe_409787_psm", "option": "1"},
+        blocking=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_psm_3phase_calls_select_option(dispatcher, mock_hass):
+    """send_psm('2') ska anropa select.select_option med psm-entitet och option='2'."""
+    result = await dispatcher.send_psm("2")
+
+    assert result is True
+    mock_hass.services.async_call.assert_called_once_with(
+        "select",
+        "select_option",
+        {"entity_id": "select.goe_409787_psm", "option": "2"},
+        blocking=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_psm_returns_false_without_psm_entity(mock_hass):
+    """send_psm ska returnera False och logga WARNING om ingen psm-entitet finns."""
+    dispatcher = CommandDispatcher(mock_hass, {"amp": "number.goe_409787_amp"})
+
+    with patch("custom_components.ev_load_balancer.command_dispatcher._LOGGER") as mock_logger:
+        result = await dispatcher.send_psm("1")
+        assert result is False
+        mock_logger.warning.assert_called_once()
+
+    mock_hass.services.async_call.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_send_psm_logs_error_but_does_not_raise(mock_hass):
+    """send_psm ska logga ERROR men inte kasta undantag vid fel."""
+    mock_hass.services.async_call = AsyncMock(side_effect=Exception("Nätverksfel"))
+    dispatcher = CommandDispatcher(mock_hass, CHARGER_ENTITIES)
+
+    with patch("custom_components.ev_load_balancer.command_dispatcher._LOGGER") as mock_logger:
+        result = await dispatcher.send_psm("1")
+        assert result is False
+        mock_logger.error.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_send_psm_returns_true_on_success(dispatcher, mock_hass):
+    """send_psm ska returnera True vid framgångsrikt anrop."""
+    result = await dispatcher.send_psm("2")
+    assert result is True

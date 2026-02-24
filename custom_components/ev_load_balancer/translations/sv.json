@@ -1,5 +1,23 @@
 {
   "title": "EV Load Balancer",
+  "entity": {
+    "sensor": {
+      "status": {
+        "state_attributes": {
+          "charging_mode": {
+            "name": "Laddningsläge"
+          },
+          "phase_mode": {
+            "name": "Fasläge",
+            "state": {
+              "three_phase": "3-fas",
+              "one_phase": "1-fas"
+            }
+          }
+        }
+      }
+    }
+  },
   "config": {
     "step": {
       "user": {

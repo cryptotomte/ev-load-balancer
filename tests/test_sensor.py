@@ -6,6 +6,7 @@ Täcker:
 - US3: Nedreglering utan cooldown
 - US4: PAUSED-transition vid kapacitetsbrist (timer-baserad via hysteres, PR-04)
 - PR-04: Hysteres + kommando-dispatcher integration
+- PR-06: Fasväxling 1↔3 fas integration
 """
 
 from __future__ import annotations
@@ -235,6 +236,7 @@ def test_status_sensor_extra_attributes_before_calculation(full_config_entry):
     assert attrs["device_loads"] is None
     assert attrs["active_phases"] is None
     assert attrs["charging_mode"] is None
+    assert attrs["phase_mode"] == "three_phase"  # Initialt alltid three_phase
     assert attrs["safety_margin"] == 2.0
     assert attrs["charger_profile"] == "goe_gemini"
 
@@ -1241,3 +1243,312 @@ def _make_coordinator(entry: MockConfigEntry) -> EVLoadBalancerCoordinator:
     with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
         mock_debouncer_cls.return_value = MagicMock()
         return EVLoadBalancerCoordinator(mock_hass, entry)
+
+
+# ---------------------------------------------------------------------------
+# PR-06: T012 — Nedväxling 3→1 integration
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_phase_downscale_sends_psm_when_l1_low_l2_ok(hass, full_config_entry):
+    """Nedväxling 3→1: kapacitetsbrist på L1, L2 OK → send_psm('1') skickas.
+
+    Scenario:
+        L1 = hög last → available_l1 = 25 - (22 - 0) - 2 = 1A < min_current=6A
+        L2 = låg last → available_l2 = 25 - (5 - 0) - 2 = 18A >= min_current=6A
+        → Nedväxling: send_psm('1')
+    """
+    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
+        mock_debouncer_cls.return_value = MagicMock()
+        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+
+    # Mocka dispatcher
+    coordinator._dispatcher.send_amp = AsyncMock(return_value=True)
+    coordinator._dispatcher.send_psm = AsyncMock(return_value=True)
+    coordinator._dispatcher.pause = AsyncMock(return_value=True)
+    coordinator._dispatcher.resume = AsyncMock(return_value=True)
+
+    # Sätt state till BALANCING
+    sm = coordinator._state_machine
+    sm.record_successful_calculation()
+    sm.record_successful_calculation()
+    sm.on_car_connected()
+    assert coordinator.state.value == "balancing"
+
+    # Sensorvärden: L1 hög last, L2 låg last, L3 medel
+    # available_l1 = 25 - (22 - 0) - 2 = 1A < 6 (under min)
+    # available_l2 = 25 - (5 - 0) - 2 = 18A >= 6 (ok)
+    # available_l3 = 25 - (15 - 0) - 2 = 8A >= 6 (ok)
+    # map = [1, 2, 3] (3-fas) → phase_switcher i THREE_PHASE
+    hass.states.async_set("sensor.current_l1", "22.0")
+    hass.states.async_set("sensor.current_l2", "5.0")
+    hass.states.async_set("sensor.current_l3", "15.0")
+    hass.states.async_set("sensor.goe_409787_nrg_4", "0.0")
+    hass.states.async_set("sensor.goe_409787_nrg_5", "0.0")
+    hass.states.async_set("sensor.goe_409787_nrg_6", "0.0")
+    hass.states.async_set("sensor.goe_409787_map", "[1, 2, 3]")
+    hass.states.async_set("sensor.goe_409787_car_value", "Charging")
+
+    await coordinator._async_calculate()
+
+    # send_psm ska ha anropats med '1' (1-fas)
+    coordinator._dispatcher.send_psm.assert_called_once_with("1")
+
+
+@pytest.mark.asyncio
+async def test_phase_downscale_not_sent_when_l2_also_low(hass, full_config_entry):
+    """Ingen nedväxling om L2 också saknar kapacitet — pauslogiken tar över.
+
+    Scenario:
+        Alla faser: hög last → available < min_current för alla faser
+        → Ingen nedväxling (ingen psm-signal)
+    """
+    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
+        mock_debouncer_cls.return_value = MagicMock()
+        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+
+    coordinator._dispatcher.send_amp = AsyncMock(return_value=True)
+    coordinator._dispatcher.send_psm = AsyncMock(return_value=True)
+    coordinator._dispatcher.pause = AsyncMock(return_value=True)
+    coordinator._dispatcher.resume = AsyncMock(return_value=True)
+
+    sm = coordinator._state_machine
+    sm.record_successful_calculation()
+    sm.record_successful_calculation()
+    sm.on_car_connected()
+
+    # Alla faser: hög last → available < min_current
+    # available_l1 = 25 - (22 - 0) - 2 = 1A < 6
+    # available_l2 = 25 - (22 - 0) - 2 = 1A < 6
+    # available_l3 = 25 - (22 - 0) - 2 = 1A < 6
+    hass.states.async_set("sensor.current_l1", "22.0")
+    hass.states.async_set("sensor.current_l2", "22.0")
+    hass.states.async_set("sensor.current_l3", "22.0")
+    hass.states.async_set("sensor.goe_409787_nrg_4", "0.0")
+    hass.states.async_set("sensor.goe_409787_nrg_5", "0.0")
+    hass.states.async_set("sensor.goe_409787_nrg_6", "0.0")
+    hass.states.async_set("sensor.goe_409787_map", "[1, 2, 3]")
+    hass.states.async_set("sensor.goe_409787_car_value", "Charging")
+
+    T0 = datetime(2025, 1, 1, 12, 0, 0)
+    with patch("custom_components.ev_load_balancer.sensor.utcnow", return_value=T0):
+        await coordinator._async_calculate()
+
+    # Ingen psm-signal — L2 har heller inte kapacitet
+    coordinator._dispatcher.send_psm.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_phase_upscale_sends_psm_after_60s(hass, full_config_entry):
+    """Uppväxling 1→3: alla faser >= min_current i 60s → send_psm('2') skickas.
+
+    T016: Integrationstest för uppväxling.
+    """
+    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
+        mock_debouncer_cls.return_value = MagicMock()
+        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+
+    coordinator._dispatcher.send_amp = AsyncMock(return_value=True)
+    coordinator._dispatcher.send_psm = AsyncMock(return_value=True)
+    coordinator._dispatcher.pause = AsyncMock(return_value=True)
+    coordinator._dispatcher.resume = AsyncMock(return_value=True)
+
+    # Sätt fasväxlaren till ONE_PHASE-läge (simulerar att vi nyss växlat till 1-fas)
+    from custom_components.ev_load_balancer.phase_switcher import PhaseMode
+
+    coordinator._phase_switcher.record_mode_change(PhaseMode.ONE_PHASE)
+
+    sm = coordinator._state_machine
+    sm.record_successful_calculation()
+    sm.record_successful_calculation()
+    sm.on_car_connected()
+
+    # Alla faser: låg last → available > min_current
+    # available_l1 = 25 - (5 - 0) - 2 = 18A >= 6
+    # available_l2 = 25 - (5 - 0) - 2 = 18A >= 6
+    # available_l3 = 25 - (5 - 0) - 2 = 18A >= 6
+    hass.states.async_set("sensor.current_l1", "5.0")
+    hass.states.async_set("sensor.current_l2", "5.0")
+    hass.states.async_set("sensor.current_l3", "5.0")
+    hass.states.async_set("sensor.goe_409787_nrg_4", "0.0")
+    hass.states.async_set("sensor.goe_409787_nrg_5", "0.0")
+    hass.states.async_set("sensor.goe_409787_nrg_6", "0.0")
+    # map=[2] → 1-fas → phase_switcher var ONE_PHASE → PHEV-detektion triggas INTE
+    # (eftersom phase_switcher.current_mode == ONE_PHASE, ej THREE_PHASE)
+    hass.states.async_set("sensor.goe_409787_map", "[2]")
+    hass.states.async_set("sensor.goe_409787_car_value", "Charging")
+
+    T0 = datetime(2025, 1, 1, 12, 0, 0)
+
+    # T=0s: timer startar → ingen uppväxling
+    with patch("custom_components.ev_load_balancer.sensor.utcnow", return_value=T0):
+        await coordinator._async_calculate()
+    coordinator._dispatcher.send_psm.assert_not_called()
+
+    # T=60s: timer expired → uppväxling → send_psm('2')
+    with patch(
+        "custom_components.ev_load_balancer.sensor.utcnow",
+        return_value=T0 + timedelta(seconds=60),
+    ):
+        await coordinator._async_calculate()
+
+    coordinator._dispatcher.send_psm.assert_called_once_with("2")
+
+
+@pytest.mark.asyncio
+async def test_phev_detection_disables_phase_switching(hass, full_config_entry):
+    """PHEV-detektion: map visar [2] i THREE_PHASE-läge → fasväxling inaktiveras.
+
+    T020/T021: Integrationstest för PHEV-skydd.
+    """
+    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
+        mock_debouncer_cls.return_value = MagicMock()
+        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+
+    coordinator._dispatcher.send_amp = AsyncMock(return_value=True)
+    coordinator._dispatcher.send_psm = AsyncMock(return_value=True)
+    coordinator._dispatcher.pause = AsyncMock(return_value=True)
+    coordinator._dispatcher.resume = AsyncMock(return_value=True)
+
+    # phase_switcher är i THREE_PHASE (standard)
+    from custom_components.ev_load_balancer.phase_switcher import PhaseMode
+
+    assert coordinator._phase_switcher.current_mode == PhaseMode.THREE_PHASE
+
+    sm = coordinator._state_machine
+    sm.record_successful_calculation()
+    sm.record_successful_calculation()
+    sm.on_car_connected()
+
+    # Sensorvärden: L1 hög last (kapacitetsbrist), L2 OK
+    # men map=[2] → PHEV-detektion → fasväxling inaktiveras
+    hass.states.async_set("sensor.current_l1", "22.0")
+    hass.states.async_set("sensor.current_l2", "5.0")
+    hass.states.async_set("sensor.current_l3", "5.0")
+    hass.states.async_set("sensor.goe_409787_nrg_4", "0.0")
+    hass.states.async_set("sensor.goe_409787_nrg_5", "0.0")
+    hass.states.async_set("sensor.goe_409787_nrg_6", "0.0")
+    # map=[2] i THREE_PHASE-läge → PHEV-detektion
+    hass.states.async_set("sensor.goe_409787_map", "[2]")
+    hass.states.async_set("sensor.goe_409787_car_value", "Charging")
+
+    await coordinator._async_calculate()
+
+    # Ingen psm-signal (PHEV-skydd aktiverat)
+    coordinator._dispatcher.send_psm.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_phase_mode_attribute_in_status_sensor(hass, full_config_entry):
+    """Status-sensorns phase_mode-attribut ska visa aktuellt fasläge."""
+    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
+        mock_debouncer_cls.return_value = MagicMock()
+        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+
+    # Initialt: three_phase
+    sensor = BalancerStatusSensor(coordinator)
+    attrs = sensor.extra_state_attributes
+    assert attrs["phase_mode"] == "three_phase"
+
+    # Sätt one_phase
+    from custom_components.ev_load_balancer.phase_switcher import PhaseMode
+
+    coordinator._phase_switcher.record_mode_change(PhaseMode.ONE_PHASE)
+    attrs = sensor.extra_state_attributes
+    assert attrs["phase_mode"] == "one_phase"
+
+
+@pytest.mark.asyncio
+async def test_phase_switching_not_called_in_idle_state(hass, full_config_entry):
+    """Fasväxling ska inte ske i IDLE-tillstånd."""
+    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
+        mock_debouncer_cls.return_value = MagicMock()
+        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+
+    coordinator._dispatcher.send_psm = AsyncMock(return_value=True)
+    coordinator._dispatcher.send_amp = AsyncMock(return_value=True)
+    coordinator._dispatcher.pause = AsyncMock(return_value=True)
+    coordinator._dispatcher.resume = AsyncMock(return_value=True)
+
+    # State IDLE (2 beräkningar men ingen bil)
+    sm = coordinator._state_machine
+    sm.record_successful_calculation()
+    sm.record_successful_calculation()
+    assert coordinator.state.value == "idle"
+
+    # Kapacitetsbrist på L1, L2 ok (men state = IDLE)
+    hass.states.async_set("sensor.current_l1", "22.0")
+    hass.states.async_set("sensor.current_l2", "5.0")
+    hass.states.async_set("sensor.current_l3", "5.0")
+    hass.states.async_set("sensor.goe_409787_nrg_4", "0.0")
+    hass.states.async_set("sensor.goe_409787_nrg_5", "0.0")
+    hass.states.async_set("sensor.goe_409787_nrg_6", "0.0")
+    hass.states.async_set("sensor.goe_409787_map", "[1, 2, 3]")
+    hass.states.async_set("sensor.goe_409787_car_value", "Idle")
+
+    await coordinator._async_calculate()
+
+    # Ingen psm i IDLE
+    coordinator._dispatcher.send_psm.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_generic_profile_does_not_use_phase_switching(hass):
+    """Generic-profil ska inte använda fasväxling (saknar phase_switching-kapabilitet)."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Generic EV",
+        data={
+            "profile_id": "generic",
+            "charger_entities": {
+                "amp": "number.generic_amp",
+                "frc": "select.generic_frc",
+                "car_value": "sensor.generic_car",
+                "map": "sensor.generic_map",
+                "nrg_4": "sensor.generic_nrg4",
+                "nrg_5": "sensor.generic_nrg5",
+                "nrg_6": "sensor.generic_nrg6",
+            },
+            "phases": [
+                {"sensor": "sensor.current_l1", "max_ampere": 25, "label": "L1"},
+                {"sensor": "sensor.current_l2", "max_ampere": 25, "label": "L2"},
+                {"sensor": "sensor.current_l3", "max_ampere": 25, "label": "L3"},
+            ],
+            "safety_margin": 2,
+            "min_current": 6,
+            "max_current": 16,
+        },
+    )
+
+    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
+        mock_debouncer_cls.return_value = MagicMock()
+        coordinator = EVLoadBalancerCoordinator(hass, entry)
+
+    # Generic-profil: phase_switching NOT i capabilities
+    assert coordinator._supports_phase_switching is False
+
+    coordinator._dispatcher.send_psm = AsyncMock(return_value=True)
+    coordinator._dispatcher.send_amp = AsyncMock(return_value=True)
+    coordinator._dispatcher.pause = AsyncMock(return_value=True)
+    coordinator._dispatcher.resume = AsyncMock(return_value=True)
+
+    sm = coordinator._state_machine
+    sm.record_successful_calculation()
+    sm.record_successful_calculation()
+    sm.on_car_connected()
+
+    # Kapacitetsbrist på L1, L2 ok
+    hass.states.async_set("sensor.current_l1", "22.0")
+    hass.states.async_set("sensor.current_l2", "5.0")
+    hass.states.async_set("sensor.current_l3", "5.0")
+    hass.states.async_set("sensor.generic_nrg4", "0.0")
+    hass.states.async_set("sensor.generic_nrg5", "0.0")
+    hass.states.async_set("sensor.generic_nrg6", "0.0")
+    hass.states.async_set("sensor.generic_map", "[1, 2, 3]")
+    hass.states.async_set("sensor.generic_car", "Charging")
+
+    await coordinator._async_calculate()
+
+    # Ingen psm-signal — generic-profil stödjer inte fasväxling
+    coordinator._dispatcher.send_psm.assert_not_called()

@@ -48,6 +48,8 @@ from .const import (
     DEFAULT_SAFETY_MARGIN,
     DOMAIN,
     PAUSE_DELAY_SECONDS,
+    PSM_VALUE_1PHASE,
+    PSM_VALUE_3PHASE,
     RESUME_DELAY_SECONDS,
     RESUME_THRESHOLD_OFFSET,
     SENSOR_AVAILABLE_L1,
@@ -58,6 +60,7 @@ from .const import (
     SENSOR_TARGET_CURRENT,
 )
 from .hysteresis import HysteresisAction, HysteresisController
+from .phase_switcher import PhaseMode, PhaseSwitcher
 from .state_machine import BalancerState, LoadBalancerStateMachine
 
 _LOGGER = logging.getLogger(__name__)
@@ -147,6 +150,17 @@ class EVLoadBalancerCoordinator:
             cooldown=COOLDOWN_SECONDS,
         )
 
+        # Fas-switcher (PR-06): hanterar automatisk 1↔3-fas växling
+        self._phase_switcher = PhaseSwitcher(min_current=self._min_current)
+
+        # Kontrollera om laddarens profil stödjer fasväxling
+        from .charger_profiles import PROFILES
+
+        profile = PROFILES.get(self._profile_id)
+        self._supports_phase_switching = (
+            profile is not None and "phase_switching" in profile.capabilities
+        )
+
         # Kommando-dispatcher (PR-04)
         self._dispatcher = CommandDispatcher(hass, self._charger_entities)
 
@@ -179,6 +193,11 @@ class EVLoadBalancerCoordinator:
     def last_sent_amp(self) -> int:
         """Returnerar senast bekräftad laddström i ampere."""
         return self._last_sent_amp
+
+    @property
+    def phase_switcher_mode(self) -> PhaseMode:
+        """Returnerar fasväxlarens aktuella läge (three_phase/one_phase)."""
+        return self._phase_switcher.current_mode
 
     def register_listener(self, callback_fn: Callable) -> None:
         """Registrera en sensor-lyssnare som anropas vid uppdateringar."""
@@ -452,6 +471,38 @@ class EVLoadBalancerCoordinator:
         # Hantera bilstatus → IDLE/BALANCING-övergångar
         self._handle_car_status()
 
+        # Detektera PHEV: uppdatera phase_switcher om laddaren enbart kör 1-fas
+        if self._supports_phase_switching:
+            self._detect_phev_and_update_capability(active_phase_numbers)
+
+        # Hantera fasväxling INNAN hysteres (PR-06)
+        # Fasväxling kan lösa kapacitetsbrist utan att behöva pausa (US4)
+        current_sm_state = self._state_machine.state
+        if self._supports_phase_switching and current_sm_state in (
+            BalancerState.BALANCING,
+            BalancerState.PAUSED,
+        ):
+            phase_cmd = self._phase_switcher.evaluate(
+                available_per_phase=result.available_per_phase,
+                min_current=self._min_current,
+                now=utcnow(),
+            )
+            if phase_cmd is not None:
+                psm_value = (
+                    PSM_VALUE_1PHASE
+                    if phase_cmd.target_mode == PhaseMode.ONE_PHASE
+                    else PSM_VALUE_3PHASE
+                )
+                psm_sent = await self._dispatcher.send_psm(psm_value)
+                if psm_sent:
+                    self._phase_switcher.record_mode_change(phase_cmd.target_mode)
+                    _LOGGER.info(
+                        "Fasväxling: %s (psm='%s') — %s",
+                        phase_cmd.action,
+                        psm_value,
+                        phase_cmd.reason,
+                    )
+
         # Hantera kapacitetsbrist/reglering via hysteres (PR-04)
         current_sm_state = self._state_machine.state
         if current_sm_state in (BalancerState.BALANCING, BalancerState.PAUSED):
@@ -516,6 +567,36 @@ class EVLoadBalancerCoordinator:
 
         # Notifiera alla sensorlyssnare om uppdatering
         self._notify_all_listeners()
+
+    def _detect_phev_and_update_capability(self, active_phase_numbers: list[int]) -> None:
+        """Detektera PHEV och uppdatera fasväxlarens kapabilitet.
+
+        PHEV-logik: Om map-sensorn visar enbart 1-fas (exakt 1 fasnummer) OCH
+        fasväxlaren är i THREE_PHASE-läge tolkas det som att laddaren/bilen
+        tvingade 1-fas utan att vi kommenderade det (trolig PHEV). I så fall
+        inaktiveras fasväxling.
+
+        Om map visar 3-fas (fler än en fas aktiv) återaktiveras fasväxling.
+
+        Vi checkar mot phase_switcher.current_mode för att undvika att
+        inaktivera fasväxling när VI själva nyss kommenderade 1-fas.
+
+        Args:
+            active_phase_numbers: Aktiva fasnummer från map-sensorn.
+        """
+        if (
+            len(active_phase_numbers) == 1
+            and self._phase_switcher.current_mode == PhaseMode.THREE_PHASE
+        ):
+            # Map visar 1-fas men vi är i 3-fas-läge → PHEV tvingade 1-fas
+            self._phase_switcher.set_device_capability(supports_3phase=False)
+            _LOGGER.debug(
+                "PHEV-detektion: map visar enbart 1 fas %s i 3-fas-läge — fasväxling inaktiverad",
+                active_phase_numbers,
+            )
+        elif len(active_phase_numbers) > 1:
+            # Map visar 3-fas → laddaren klarar 3-fas
+            self._phase_switcher.set_device_capability(supports_3phase=True)
 
     def _handle_car_status(self) -> None:
         """Hanterar bilstatus för IDLE/BALANCING-övergångar.
@@ -640,6 +721,7 @@ class BalancerStatusSensor(_EVSensorBase):
             "device_loads": result.device_loads if result else None,
             "active_phases": result.active_phases if result else None,
             "charging_mode": result.charging_mode if result else None,
+            "phase_mode": str(self._coordinator.phase_switcher_mode),
             "safety_margin": safety_margin,
             "charger_profile": profile_id,
             "last_sent_amp": self._coordinator.last_sent_amp,
