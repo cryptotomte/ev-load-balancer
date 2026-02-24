@@ -39,3 +39,27 @@ CONF_MAX_CURRENT = "max_current"
 
 CONF_PHASE_COUNT = "phase_count"
 """Nyckel för fasantalsinställning ('auto', '1' eller '3')."""
+
+# --- Cooldown och sensor-namnkonstanter (PR-03) ---
+
+COOLDOWN_SECONDS = 5.0
+"""Cooldown i sekunder för uppåtreglering (Debouncer trailing edge)."""
+
+# Suffix för sensor-entitets-ID:n
+SENSOR_STATUS = "status"
+"""Status-sensorns entitets-ID suffix."""
+
+SENSOR_AVAILABLE_L1 = "available_l1"
+"""Tillgänglig ström L1 — sensorns ID suffix."""
+
+SENSOR_AVAILABLE_L2 = "available_l2"
+"""Tillgänglig ström L2 — sensorns ID suffix."""
+
+SENSOR_AVAILABLE_L3 = "available_l3"
+"""Tillgänglig ström L3 — sensorns ID suffix."""
+
+SENSOR_AVAILABLE_MIN = "available_min"
+"""Minsta tillgängliga ström (min av aktiva faser) — sensorns ID suffix."""
+
+SENSOR_TARGET_CURRENT = "target_current"
+"""Beräknad målström — sensorns ID suffix."""

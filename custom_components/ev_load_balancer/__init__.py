@@ -3,6 +3,7 @@
 import logging
 
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 
@@ -10,6 +11,9 @@ from .charger_profiles import PROFILES
 from .const import CONF_PROFILE_ID, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
+
+# Plattformar som integrationen exponerar
+PLATFORMS = [Platform.SENSOR]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -38,10 +42,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         model=entry.data.get(CONF_PROFILE_ID, "generic"),
     )
 
+    # Sätt upp sensor-plattformen
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Avinstallera integrationen och rensa hass.data."""
-    hass.data[DOMAIN].pop(entry.entry_id, None)
-    return True
+    entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+    coordinator = entry_data.get("coordinator")
+    if coordinator:
+        await coordinator.async_shutdown()
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unload_ok:
+        hass.data[DOMAIN].pop(entry.entry_id, None)
+    return unload_ok
