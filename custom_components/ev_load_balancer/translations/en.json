@@ -81,7 +81,8 @@
           "safety_margin": "Safety margin (A)",
           "min_current": "Minimum charge current (A)",
           "max_current": "Maximum charge current (A)",
-          "phase_count": "Phase count"
+          "phase_count": "Phase count",
+          "capacity_warning_threshold": "Capacity warning threshold (A)"
         }
       }
     },
@@ -89,6 +90,18 @@
       "no_phases": "At least one phase sensor (L1) must be configured.",
       "duplicate_phase_sensors": "The same sensor cannot be used for multiple phases. Each phase must have a unique current sensor.",
       "max_less_than_min": "Maximum charge current must be at least as large as minimum charge current."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "utilization": {
+        "name": "Utilization"
+      }
+    },
+    "binary_sensor": {
+      "capacity_warning": {
+        "name": "Capacity Warning"
+      }
     }
   }
 }

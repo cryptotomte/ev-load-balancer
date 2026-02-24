@@ -1,15 +1,18 @@
 """Sensor-plattform för EV Load Balancer.
 
-Exponerar 6 HA-sensorentiteter:
+Exponerar 7 HA-sensorentiteter:
   - ev_load_balancer_status        : Systemstatus (BalancerState)
   - ev_load_balancer_available_l1  : Tillgänglig ström L1 (A)
   - ev_load_balancer_available_l2  : Tillgänglig ström L2 (A)
   - ev_load_balancer_available_l3  : Tillgänglig ström L3 (A)
   - ev_load_balancer_available_min : Minsta tillgängliga ström (A)
   - ev_load_balancer_target_current: Beräknad målström (A)
+  - ev_load_balancer_utilization   : Kapacitetsutnyttjande i procent (%)
 
 Koordinatorn (EVLoadBalancerCoordinator) äger state machine, beräkningsmotor
 och lyssnarlista. Alla sensorer prenumererar via koordinatorn.
+
+Events skickas till HA:s event bus vid viktiga tillståndsändringar (PR-07).
 """
 
 from __future__ import annotations
@@ -25,7 +28,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import UnitOfElectricCurrent
+from homeassistant.const import PERCENTAGE, UnitOfElectricCurrent
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers.debounce import Debouncer
 from homeassistant.helpers.entity import DeviceInfo
@@ -36,6 +39,7 @@ from homeassistant.util.dt import utcnow
 from .calculator import CalculationResult, calculate
 from .command_dispatcher import CommandDispatcher
 from .const import (
+    CONF_CAPACITY_WARNING_THRESHOLD,
     CONF_CHARGER_ENTITIES,
     CONF_MAX_CURRENT,
     CONF_MIN_CURRENT,
@@ -43,10 +47,18 @@ from .const import (
     CONF_PROFILE_ID,
     CONF_SAFETY_MARGIN,
     COOLDOWN_SECONDS,
+    DEFAULT_CAPACITY_WARNING_THRESHOLD,
     DEFAULT_MAX_CURRENT,
     DEFAULT_MIN_CURRENT,
     DEFAULT_SAFETY_MARGIN,
     DOMAIN,
+    EVENT_CAPACITY_WARNING,
+    EVENT_CURRENT_ADJUSTED,
+    EVENT_DEVICE_PAUSED,
+    EVENT_DEVICE_RESUMED,
+    EVENT_FAILSAFE_ACTIVATED,
+    EVENT_PHASE_SWITCHED,
+    EVENT_SENSOR_LOST,
     PAUSE_DELAY_SECONDS,
     RESUME_DELAY_SECONDS,
     RESUME_THRESHOLD_OFFSET,
@@ -56,6 +68,7 @@ from .const import (
     SENSOR_AVAILABLE_MIN,
     SENSOR_STATUS,
     SENSOR_TARGET_CURRENT,
+    SENSOR_UTILIZATION,
 )
 from .hysteresis import HysteresisAction, HysteresisController
 from .state_machine import BalancerState, LoadBalancerStateMachine
@@ -88,6 +101,7 @@ async def async_setup_entry(
             AvailableCurrentSensor(coordinator, "l3"),
             AvailableCurrentSensor(coordinator, "min"),
             TargetCurrentSensor(coordinator),
+            UtilizationSensor(coordinator),
         ]
     )
 
@@ -162,6 +176,9 @@ class EVLoadBalancerCoordinator:
             function=self._async_calculate,
         )
 
+        # Kapacitetsvarnings-state (för transition-detektion)
+        self._last_capacity_warning: bool = False
+
         # Cleanup-callbacks (registrerade lyssnare)
         self._remove_listeners: list[Callable] = []
 
@@ -180,6 +197,11 @@ class EVLoadBalancerCoordinator:
         """Returnerar senast bekräftad laddström i ampere."""
         return self._last_sent_amp
 
+    @property
+    def phases(self) -> list[dict]:
+        """Returnerar lista med konfigurerade faser (publik property)."""
+        return self._phases
+
     def register_listener(self, callback_fn: Callable) -> None:
         """Registrera en sensor-lyssnare som anropas vid uppdateringar."""
         self._notify_listeners.append(callback_fn)
@@ -193,6 +215,160 @@ class EVLoadBalancerCoordinator:
         """Notifiera alla registrerade lyssnare om uppdatering."""
         for listener in self._notify_listeners:
             listener()
+
+    def _fire_event(self, event_type: str, data: dict) -> None:
+        """Skicka ett event till HA:s event bus.
+
+        Lägger automatiskt till entity_id och ISO 8601-tidsstämpel i event-data.
+        Hanterar eventuella fel via try/except för att inte påverka styrlogiken.
+
+        Args:
+            event_type: Event-typ, t.ex. EVENT_CURRENT_ADJUSTED.
+            data: Extra kontext-data att inkludera i eventet.
+        """
+        event_data = {
+            "entity_id": f"sensor.{DOMAIN}_{SENSOR_STATUS}",
+            "timestamp": utcnow().isoformat(),
+            **data,
+        }
+        try:
+            self.hass.bus.async_fire(event_type, event_data)
+        except Exception:
+            _LOGGER.error(
+                "Misslyckades att skicka event '%s'",
+                event_type,
+                exc_info=True,
+            )
+
+    def _get_capacity_warning_threshold(self) -> int:
+        """Läs kapacitetsvarnings-tröskel med options > data > default-prioritering."""
+        opts = self.entry.options
+        data = self.entry.data
+        return int(
+            opts.get(
+                CONF_CAPACITY_WARNING_THRESHOLD,
+                data.get(CONF_CAPACITY_WARNING_THRESHOLD, DEFAULT_CAPACITY_WARNING_THRESHOLD),
+            )
+        )
+
+    def _check_capacity_warning(self, result: CalculationResult) -> None:
+        """Kontrollera kapacitetsvarning och skicka event vid tillståndsövergång.
+
+        Detekterar övergångar off→on och on→off och loggar/skickar event.
+
+        Args:
+            result: Senaste beräkningsresultat.
+        """
+        threshold = self._get_capacity_warning_threshold()
+        current_warning = result.available_min < threshold
+
+        if current_warning and not self._last_capacity_warning:
+            # Övergång off→on: kapacitetsvarning aktiv
+            _LOGGER.warning(
+                "Kapacitetsvarning: available_min=%.1fA < tröskel=%sA",
+                result.available_min,
+                threshold,
+            )
+            self._fire_event(
+                EVENT_CAPACITY_WARNING,
+                {
+                    "available_min": result.available_min,
+                    "threshold": threshold,
+                    "phase_loads": result.phase_loads,
+                    "active": True,
+                },
+            )
+        elif not current_warning and self._last_capacity_warning:
+            # Övergång on→off: kapacitetsvarning upphävd
+            _LOGGER.info(
+                "Kapacitetsvarning upphävd: available_min=%.1fA >= tröskel=%sA",
+                result.available_min,
+                threshold,
+            )
+
+        self._last_capacity_warning = current_warning
+
+    def fire_sensor_lost_event(self, sensor_entity: str, action_taken: str) -> None:
+        """Skicka event för sensorförlust.
+
+        Anropas externt (t.ex. vid failsafe-hantering) när en sensor
+        blir unavailable och en åtgärd vidtagits.
+
+        Args:
+            sensor_entity: Entitets-ID för sensorn som försvann.
+            action_taken: Beskrivning av vidtagen åtgärd.
+        """
+        _LOGGER.warning(
+            "Sensorförlust: %s — åtgärd: %s",
+            sensor_entity,
+            action_taken,
+        )
+        self._fire_event(
+            EVENT_SENSOR_LOST,
+            {
+                "sensor_entity": sensor_entity,
+                "action_taken": action_taken,
+            },
+        )
+
+    def fire_failsafe_activated_event(
+        self, trigger: str, action: str, sensors_status: dict
+    ) -> None:
+        """Skicka event för failsafe-aktivering.
+
+        Anropas när systemet går in i FAILSAFE-tillstånd.
+
+        Args:
+            trigger: Orsak till failsafe-aktivering.
+            action: Vidtagen åtgärd.
+            sensors_status: Dict med sensorernas status.
+        """
+        _LOGGER.error(
+            "Failsafe aktiverad: trigger=%s, åtgärd=%s",
+            trigger,
+            action,
+        )
+        self._fire_event(
+            EVENT_FAILSAFE_ACTIVATED,
+            {
+                "trigger": trigger,
+                "action": action,
+                "sensors_status": sensors_status,
+            },
+        )
+
+    def fire_phase_switched_event(
+        self,
+        from_mode: str,
+        to_mode: str,
+        reason: str,
+        available_per_phase: list[float],
+    ) -> None:
+        """Skicka event för fasväxling.
+
+        Anropas när systemet växlar mellan 1-fas och 3-fas.
+
+        Args:
+            from_mode: Föregående fasläge ('1-phase' eller '3-phase').
+            to_mode: Nytt fasläge ('1-phase' eller '3-phase').
+            reason: Orsak till fasväxlingen.
+            available_per_phase: Tillgänglig ström per fas (A).
+        """
+        _LOGGER.info(
+            "Fasväxling: %s → %s (%s)",
+            from_mode,
+            to_mode,
+            reason,
+        )
+        self._fire_event(
+            EVENT_PHASE_SWITCHED,
+            {
+                "from_mode": from_mode,
+                "to_mode": to_mode,
+                "reason": reason,
+                "available_per_phase": available_per_phase,
+            },
+        )
 
     async def async_setup(self) -> None:
         """Registrera event-lyssnare för alla bevakade entiteter.
@@ -481,6 +657,17 @@ class EVLoadBalancerCoordinator:
                         cmd.amp,
                         cmd.reason,
                     )
+                    # Skicka event om strömsändning lyckades
+                    self._fire_event(
+                        EVENT_CURRENT_ADJUSTED,
+                        {
+                            "old_current": old_amp,
+                            "new_current": cmd.amp,
+                            "reason": cmd.reason,
+                            "phase_loads": result.phase_loads,
+                            "available": result.available_min,
+                        },
+                    )
 
             elif cmd.action == HysteresisAction.PAUSE:
                 # Pausa laddning — övergå till PAUSED
@@ -491,6 +678,16 @@ class EVLoadBalancerCoordinator:
                     _LOGGER.warning(
                         "Laddning pausad: %s",
                         cmd.reason,
+                    )
+                    # Skicka event om pausning lyckades
+                    self._fire_event(
+                        EVENT_DEVICE_PAUSED,
+                        {
+                            "reason": cmd.reason,
+                            "available_min": result.available_min,
+                            "min_current": self._min_current,
+                            "phase_loads": result.phase_loads,
+                        },
                     )
 
             elif cmd.action == HysteresisAction.RESUME:
@@ -506,6 +703,18 @@ class EVLoadBalancerCoordinator:
                         cmd.amp,
                         cmd.reason,
                     )
+                    # Skicka event om resume lyckades
+                    self._fire_event(
+                        EVENT_DEVICE_RESUMED,
+                        {
+                            "new_current": cmd.amp,
+                            "available_per_phase": [
+                                result.available_l1,
+                                result.available_l2,
+                                result.available_l3,
+                            ],
+                        },
+                    )
 
             else:
                 # NONE — ingen åtgärd
@@ -513,6 +722,9 @@ class EVLoadBalancerCoordinator:
                     "Hysteres: ingen åtgärd (%s)",
                     cmd.reason,
                 )
+
+        # Kontrollera kapacitetsvarning och skicka event vid övergång
+        self._check_capacity_warning(result)
 
         # Notifiera alla sensorlyssnare om uppdatering
         self._notify_all_listeners()
@@ -733,3 +945,63 @@ class TargetCurrentSensor(_EVSensorBase):
         if result is None:
             return None
         return result.target_current
+
+
+# ---------------------------------------------------------------------------
+# Kapacitetsutnyttjande (utilization)
+# ---------------------------------------------------------------------------
+
+
+class UtilizationSensor(_EVSensorBase):
+    """Sensor som visar kapacitetsutnyttjande i procent.
+
+    Beräknas som: (max_ampere - available_min) / max_ampere * 100
+    Kläms till intervallet [0, 100].
+    Visas som unavailable om max_ampere är 0 eller om ingen beräkning är klar.
+    """
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_translation_key = SENSOR_UTILIZATION
+
+    def __init__(self, coordinator: EVLoadBalancerCoordinator) -> None:
+        """Initialisera utilization-sensorn."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.entry.entry_id}_{SENSOR_UTILIZATION}"
+        self._attr_name = "Utilization"
+
+    @property
+    def native_value(self) -> float | None:
+        """Returnerar kapacitetsutnyttjande i procent, eller None om ej beräknat.
+
+        Beräknas baserat på aktiva faser. Om max_ampere är 0 (ingen fas konfigurerad)
+        returneras None för att undvika division med noll.
+        """
+        result = self._coordinator.last_result
+        if result is None:
+            return None
+
+        # Beräkna max_ampere som summan av aktiva fasers max_ampere
+        phases = self._coordinator.phases
+        active_phases = result.active_phases
+        if not phases or not active_phases:
+            return None
+
+        # Hitta max_ampere för aktiva faser (index = fasnummer - 1)
+        active_max_values: list[float] = []
+        for phase_num in active_phases:
+            idx = phase_num - 1
+            if 0 <= idx < len(phases):
+                active_max_values.append(float(phases[idx].get("max_ampere", 0)))
+
+        if not active_max_values:
+            return None
+
+        # Använd minsta max_ampere bland aktiva faser (konservativt)
+        max_ampere = min(active_max_values)
+        if max_ampere <= 0:
+            return None
+
+        # Beräkna utnyttjandegrad och kläm till [0, 100]
+        utilization = (max_ampere - result.available_min) / max_ampere * 100
+        return round(max(0.0, min(100.0, utilization)), 1)

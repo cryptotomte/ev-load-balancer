@@ -27,6 +27,7 @@ from homeassistant.helpers.selector import (
 
 from .charger_profiles import PROFILES
 from .const import (
+    CONF_CAPACITY_WARNING_THRESHOLD,
     CONF_CHARGER_ENTITIES,
     CONF_MAX_CURRENT,
     CONF_MIN_CURRENT,
@@ -35,6 +36,7 @@ from .const import (
     CONF_PROFILE_ID,
     CONF_SAFETY_MARGIN,
     CONF_SERIAL,
+    DEFAULT_CAPACITY_WARNING_THRESHOLD,
     DEFAULT_MAX_CURRENT,
     DEFAULT_MIN_CURRENT,
     DEFAULT_PHASE_COUNT,
@@ -529,6 +531,9 @@ class EVLoadBalancerOptionsFlow(OptionsFlow):
                         CONF_MIN_CURRENT: min_c,
                         CONF_MAX_CURRENT: max_c,
                         CONF_PHASE_COUNT: user_input[CONF_PHASE_COUNT],
+                        CONF_CAPACITY_WARNING_THRESHOLD: int(
+                            user_input[CONF_CAPACITY_WARNING_THRESHOLD]
+                        ),
                     }
                 )
 
@@ -548,6 +553,10 @@ class EVLoadBalancerOptionsFlow(OptionsFlow):
         default_phase_count = existing_options.get(
             CONF_PHASE_COUNT,
             existing_data.get(CONF_PHASE_COUNT, DEFAULT_PHASE_COUNT),
+        )
+        default_capacity_warning = existing_options.get(
+            CONF_CAPACITY_WARNING_THRESHOLD,
+            existing_data.get(CONF_CAPACITY_WARNING_THRESHOLD, DEFAULT_CAPACITY_WARNING_THRESHOLD),
         )
 
         schema = vol.Schema(
@@ -596,6 +605,18 @@ class EVLoadBalancerOptionsFlow(OptionsFlow):
                         options=["auto", "1", "3"],
                         mode=SelectSelectorMode.DROPDOWN,
                         translation_key="phase_count",
+                    )
+                ),
+                vol.Required(
+                    CONF_CAPACITY_WARNING_THRESHOLD,
+                    default=default_capacity_warning,
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=1,
+                        max=10,
+                        step=1,
+                        unit_of_measurement="A",
+                        mode=NumberSelectorMode.BOX,
                     )
                 ),
             }

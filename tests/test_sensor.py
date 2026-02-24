@@ -1,11 +1,12 @@
 """Tester för sensor-plattformen (sensor.py).
 
 Täcker:
-- US1: 6 sensorentiteter skapas, _attr_should_poll = False, status-sensor
+- US1: 7 sensorentiteter skapas, _attr_should_poll = False, status-sensor
 - US2: Fasmedveten beräkning, map-parsning, fallback
 - US3: Nedreglering utan cooldown
 - US4: PAUSED-transition vid kapacitetsbrist (timer-baserad via hysteres, PR-04)
 - PR-04: Hysteres + kommando-dispatcher integration
+- PR-07: UtilizationSensor (procent, klämning, aktiva faser, division-by-zero)
 """
 
 from __future__ import annotations
@@ -16,12 +17,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.ev_load_balancer.calculator import CalculationResult
 from custom_components.ev_load_balancer.const import DOMAIN
 from custom_components.ev_load_balancer.sensor import (
     AvailableCurrentSensor,
     BalancerStatusSensor,
     EVLoadBalancerCoordinator,
     TargetCurrentSensor,
+    UtilizationSensor,
     async_setup_entry,
 )
 from custom_components.ev_load_balancer.state_machine import BalancerState
@@ -104,8 +107,8 @@ def _make_mock_state(state_value: str):
 
 
 @pytest.mark.asyncio
-async def test_async_setup_entry_creates_6_sensors(hass, full_config_entry):
-    """async_setup_entry ska skapa 6 sensorentiteter och lägga dem till HA."""
+async def test_async_setup_entry_creates_7_sensors(hass, full_config_entry):
+    """async_setup_entry ska skapa 7 sensorentiteter och lägga dem till HA."""
     full_config_entry.add_to_hass(hass)
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][full_config_entry.entry_id] = {}
@@ -124,7 +127,7 @@ async def test_async_setup_entry_creates_6_sensors(hass, full_config_entry):
 
         await async_setup_entry(hass, full_config_entry, mock_add_entities)
 
-    assert len(added_entities) == 6
+    assert len(added_entities) == 7
     # Verifiera att koordinatorn lagrades i hass.data
     assert "coordinator" in hass.data[DOMAIN][full_config_entry.entry_id]
 
@@ -148,14 +151,16 @@ async def test_sensors_have_correct_types(hass, full_config_entry):
 
         await async_setup_entry(hass, full_config_entry, mock_add_entities)
 
-    # Kontrollera typer: 1 status, 4 available (l1/l2/l3/min), 1 target
+    # Kontrollera typer: 1 status, 4 available (l1/l2/l3/min), 1 target, 1 utilization
     status_sensors = [e for e in added_entities if isinstance(e, BalancerStatusSensor)]
     available_sensors = [e for e in added_entities if isinstance(e, AvailableCurrentSensor)]
     target_sensors = [e for e in added_entities if isinstance(e, TargetCurrentSensor)]
+    utilization_sensors = [e for e in added_entities if isinstance(e, UtilizationSensor)]
 
     assert len(status_sensors) == 1
     assert len(available_sensors) == 4
     assert len(target_sensors) == 1
+    assert len(utilization_sensors) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1241,3 +1246,167 @@ def _make_coordinator(entry: MockConfigEntry) -> EVLoadBalancerCoordinator:
     with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
         mock_debouncer_cls.return_value = MagicMock()
         return EVLoadBalancerCoordinator(mock_hass, entry)
+
+
+def _make_result(available_min: float, active_phases: list | None = None) -> CalculationResult:
+    """Hjälpfunktion: skapa CalculationResult med given available_min."""
+    return CalculationResult(
+        target_current=8,
+        available_l1=available_min,
+        available_l2=available_min,
+        available_l3=available_min,
+        available_min=available_min,
+        active_phases=active_phases if active_phases is not None else [1, 2, 3],
+        phase_loads=[10.0, 10.0, 10.0],
+        device_loads=[0.0, 0.0, 0.0],
+        charging_mode="3-phase",
+    )
+
+
+# ---------------------------------------------------------------------------
+# PR-07: UtilizationSensor
+# ---------------------------------------------------------------------------
+
+
+def test_utilization_sensor_should_not_poll(full_config_entry):
+    """UtilizationSensor._attr_should_poll ska vara False."""
+    coordinator = _make_coordinator(full_config_entry)
+    sensor = UtilizationSensor(coordinator)
+    assert sensor._attr_should_poll is False
+
+
+def test_utilization_sensor_returns_none_when_no_result(full_config_entry):
+    """UtilizationSensor ska returnera None om last_result är None."""
+    coordinator = _make_coordinator(full_config_entry)
+    sensor = UtilizationSensor(coordinator)
+    assert coordinator.last_result is None
+    assert sensor.native_value is None
+
+
+def test_utilization_sensor_calculates_correct_percentage(full_config_entry):
+    """UtilizationSensor ska beräkna korrekt procent.
+
+    Scenario: max_ampere=25, available_min=5A
+    Utnyttjandegrad = (25 - 5) / 25 * 100 = 80%
+    """
+    coordinator = _make_coordinator(full_config_entry)
+    coordinator.last_result = _make_result(available_min=5.0)
+
+    sensor = UtilizationSensor(coordinator)
+    value = sensor.native_value
+
+    assert value is not None
+    assert abs(value - 80.0) < 0.1
+
+
+def test_utilization_sensor_clamps_to_zero_when_negative(full_config_entry):
+    """UtilizationSensor ska klämma till 0% om available_min > max_ampere (kapacitetsbrist <0%)."""
+    coordinator = _make_coordinator(full_config_entry)
+    # available_min negativt → teoretiskt > 100% utnyttjande → kläms till 100%
+    coordinator.last_result = _make_result(available_min=-5.0)
+
+    sensor = UtilizationSensor(coordinator)
+    value = sensor.native_value
+
+    assert value is not None
+    assert value == 100.0  # Klämt till 100% (alla faser är 100% belastade)
+
+
+def test_utilization_sensor_clamps_to_100_max(full_config_entry):
+    """UtilizationSensor ska returnera max 100%."""
+    coordinator = _make_coordinator(full_config_entry)
+    # Extrem kapacitetsbrist
+    coordinator.last_result = _make_result(available_min=-100.0)
+
+    sensor = UtilizationSensor(coordinator)
+    value = sensor.native_value
+
+    assert value is not None
+    assert value <= 100.0
+
+
+def test_utilization_sensor_clamps_to_0_min(full_config_entry):
+    """UtilizationSensor ska returnera min 0%."""
+    coordinator = _make_coordinator(full_config_entry)
+    # available_min = max_ampere + extra (0% utnyttjande + marginal)
+    coordinator.last_result = _make_result(available_min=30.0)  # > max_ampere=25
+
+    sensor = UtilizationSensor(coordinator)
+    value = sensor.native_value
+
+    assert value is not None
+    assert value == 0.0  # Klämt till 0%
+
+
+def test_utilization_sensor_with_1_active_phase(full_config_entry):
+    """UtilizationSensor ska fungera korrekt med 1 aktiv fas."""
+    coordinator = _make_coordinator(full_config_entry)
+    # 1 aktiv fas = L2 (index 1, max_ampere=25)
+    coordinator.last_result = CalculationResult(
+        target_current=10,
+        available_l1=20.0,
+        available_l2=10.0,  # L2 är aktivt
+        available_l3=20.0,
+        available_min=10.0,
+        active_phases=[2],  # Bara L2 aktiv
+        phase_loads=[5.0, 15.0, 5.0],
+        device_loads=[0.0, 0.0, 0.0],
+        charging_mode="1-phase",
+    )
+
+    sensor = UtilizationSensor(coordinator)
+    value = sensor.native_value
+
+    # L2: max_ampere=25, available_min=10 → (25-10)/25*100 = 60%
+    assert value is not None
+    assert abs(value - 60.0) < 0.1
+
+
+def test_utilization_sensor_returns_none_for_no_active_phases(full_config_entry):
+    """UtilizationSensor ska returnera None om inga aktiva faser."""
+    coordinator = _make_coordinator(full_config_entry)
+    coordinator.last_result = CalculationResult(
+        target_current=6,
+        available_l1=20.0,
+        available_l2=20.0,
+        available_l3=20.0,
+        available_min=20.0,
+        active_phases=[],  # Inga aktiva faser
+        phase_loads=[5.0, 5.0, 5.0],
+        device_loads=[0.0, 0.0, 0.0],
+        charging_mode="3-phase",
+    )
+
+    sensor = UtilizationSensor(coordinator)
+    assert sensor.native_value is None
+
+
+@pytest.mark.asyncio
+async def test_utilization_sensor_updates_after_calculation(hass, full_config_entry):
+    """UtilizationSensor ska uppdateras korrekt efter beräkning."""
+    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
+        mock_debouncer_cls.return_value = MagicMock()
+        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+
+    coordinator._dispatcher.send_amp = AsyncMock()
+    coordinator._dispatcher.send_frc = AsyncMock()
+
+    # Sensorvärden: available = 25 - 5 - 2 = 18A per fas
+    hass.states.async_set("sensor.current_l1", "5.0")
+    hass.states.async_set("sensor.current_l2", "5.0")
+    hass.states.async_set("sensor.current_l3", "5.0")
+    hass.states.async_set("sensor.goe_409787_nrg_4", "0.0")
+    hass.states.async_set("sensor.goe_409787_nrg_5", "0.0")
+    hass.states.async_set("sensor.goe_409787_nrg_6", "0.0")
+    hass.states.async_set("sensor.goe_409787_map", "[1, 2, 3]")
+    hass.states.async_set("sensor.goe_409787_car_value", "Idle")
+
+    await coordinator._async_calculate()
+
+    assert coordinator.last_result is not None
+    sensor = UtilizationSensor(coordinator)
+    value = sensor.native_value
+
+    # available_min = 18A, max_ampere = 25A → utnyttjandegrad = (25-18)/25*100 = 28%
+    assert value is not None
+    assert abs(value - 28.0) < 1.0

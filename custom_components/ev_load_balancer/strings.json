@@ -81,7 +81,8 @@
           "safety_margin": "Säkerhetsmarginal (A)",
           "min_current": "Minsta laddström (A)",
           "max_current": "Högsta laddström (A)",
-          "phase_count": "Fasantal"
+          "phase_count": "Fasantal",
+          "capacity_warning_threshold": "Kapacitetsvarnings-tröskel (A)"
         }
       }
     },
@@ -89,6 +90,18 @@
       "no_phases": "Minst en fassensor (L1) måste konfigureras.",
       "duplicate_phase_sensors": "Samma sensor kan inte användas för flera faser. Varje fas måste ha en unik strömsensor.",
       "max_less_than_min": "Högsta laddström måste vara minst lika stor som lägsta laddström."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "utilization": {
+        "name": "Kapacitetsutnyttjande"
+      }
+    },
+    "binary_sensor": {
+      "capacity_warning": {
+        "name": "Kapacitetsvarning"
+      }
     }
   }
 }

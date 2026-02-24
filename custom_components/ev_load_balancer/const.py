@@ -74,3 +74,37 @@ SENSOR_AVAILABLE_MIN = "available_min"
 
 SENSOR_TARGET_CURRENT = "target_current"
 """Beräknad målström — sensorns ID suffix."""
+
+SENSOR_UTILIZATION = "utilization"
+"""Kapacitetsutnyttjande i procent — sensorns ID suffix."""
+
+# --- Event-namn (PR-07) ---
+
+EVENT_CURRENT_ADJUSTED = "ev_load_balancer_current_adjusted"
+"""Event som skickas när laddström justeras."""
+
+EVENT_DEVICE_PAUSED = "ev_load_balancer_device_paused"
+"""Event som skickas när laddning pausas."""
+
+EVENT_DEVICE_RESUMED = "ev_load_balancer_device_resumed"
+"""Event som skickas när laddning återupptas."""
+
+EVENT_PHASE_SWITCHED = "ev_load_balancer_phase_switched"
+"""Event som skickas vid fasväxling."""
+
+EVENT_CAPACITY_WARNING = "ev_load_balancer_capacity_warning"
+"""Event som skickas vid kapacitetsvarning (övergång av tröskel)."""
+
+EVENT_SENSOR_LOST = "ev_load_balancer_sensor_lost"
+"""Event som skickas vid sensorförlust."""
+
+EVENT_FAILSAFE_ACTIVATED = "ev_load_balancer_failsafe_activated"
+"""Event som skickas när failsafe aktiveras."""
+
+# --- Kapacitetsvarning-konstanter (PR-07) ---
+
+CONF_CAPACITY_WARNING_THRESHOLD = "capacity_warning_threshold"
+"""Nyckel för kapacitetsvarnings-tröskel i ampere."""
+
+DEFAULT_CAPACITY_WARNING_THRESHOLD = 3
+"""Standardvärde för kapacitetsvarnings-tröskel (3A)."""
