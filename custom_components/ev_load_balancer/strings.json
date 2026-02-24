@@ -1,3 +1,94 @@
 {
-  "title": "EV Load Balancer"
+  "title": "EV Load Balancer",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Välj laddarprofil",
+        "data": {
+          "profile_id": "Laddarprofil"
+        }
+      },
+      "serial": {
+        "title": "Serienummer",
+        "data": {
+          "serial": "Serienummer"
+        }
+      },
+      "entities": {
+        "title": "Laddarentiteter",
+        "data": {
+          "amp": "Laddström (amp)",
+          "frc": "Tvinga laddstatus (frc)",
+          "psm": "Fasväxling (psm)",
+          "car_value": "Bilstatus (car_value)",
+          "nrg_4": "L1 ström (nrg_4)",
+          "nrg_5": "L2 ström (nrg_5)",
+          "nrg_6": "L3 ström (nrg_6)",
+          "map": "Faskarta (map)"
+        }
+      },
+      "phases": {
+        "title": "Fassensorer",
+        "description": "Konfigurera hushållets strömsensorer per fas. Minst en fas (L1) krävs. Varje fas måste ha en unik sensor.\n\nAktuellt: {summary}",
+        "data": {
+          "phase_1_sensor": "L1 strömsensor",
+          "phase_1_max_ampere": "L1 maxström (A)",
+          "phase_2_sensor": "L2 strömsensor (valfri)",
+          "phase_2_max_ampere": "L2 maxström (A)",
+          "phase_3_sensor": "L3 strömsensor (valfri)",
+          "phase_3_max_ampere": "L3 maxström (A)"
+        }
+      },
+      "params": {
+        "title": "Beräkningsparametrar",
+        "data": {
+          "safety_margin": "Säkerhetsmarginal (A)",
+          "min_current": "Minsta laddström (A)",
+          "max_current": "Högsta laddström (A)",
+          "phase_count": "Fasantal"
+        }
+      },
+      "confirm": {
+        "title": "Bekräfta konfiguration",
+        "description": "{summary}"
+      }
+    },
+    "error": {
+      "empty_serial": "Serienummer får inte vara tomt.",
+      "no_phases": "Minst en fassensor (L1) måste konfigureras.",
+      "duplicate_phase_sensors": "Samma sensor kan inte användas för flera faser. Varje fas måste ha en unik strömsensor.",
+      "max_less_than_min": "Högsta laddström måste vara minst lika stor som lägsta laddström."
+    },
+    "abort": {}
+  },
+  "options": {
+    "step": {
+      "phases": {
+        "title": "Ändra fassensorer",
+        "description": "Uppdatera hushållets strömsensorer per fas. Minst en fas (L1) krävs.\n\nAktuellt: {summary}",
+        "data": {
+          "phase_1_sensor": "L1 strömsensor",
+          "phase_1_max_ampere": "L1 maxström (A)",
+          "phase_2_sensor": "L2 strömsensor (valfri)",
+          "phase_2_max_ampere": "L2 maxström (A)",
+          "phase_3_sensor": "L3 strömsensor (valfri)",
+          "phase_3_max_ampere": "L3 maxström (A)"
+        }
+      },
+      "params": {
+        "title": "Ändra beräkningsparametrar",
+        "data": {
+          "safety_margin": "Säkerhetsmarginal (A)",
+          "min_current": "Minsta laddström (A)",
+          "max_current": "Högsta laddström (A)",
+          "phase_count": "Fasantal"
+        }
+      }
+    },
+    "error": {
+      "no_phases": "Minst en fassensor (L1) måste konfigureras.",
+      "duplicate_phase_sensors": "Samma sensor kan inte användas för flera faser. Varje fas måste ha en unik strömsensor.",
+      "max_less_than_min": "Högsta laddström måste vara minst lika stor som lägsta laddström."
+    }
+  }
 }
