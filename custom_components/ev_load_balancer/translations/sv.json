@@ -90,7 +90,8 @@
     "error": {
       "no_phases": "Minst en fassensor (L1) måste konfigureras.",
       "duplicate_phase_sensors": "Samma sensor kan inte användas för flera faser. Varje fas måste ha en unik strömsensor.",
-      "max_less_than_min": "Högsta laddström måste vara minst lika stor som lägsta laddström."
+      "max_less_than_min": "Högsta laddström måste vara minst lika stor som lägsta laddström.",
+      "safe_current_out_of_range": "Säker standardström måste vara mellan 6 och 16 A"
     }
   },
   "selector": {

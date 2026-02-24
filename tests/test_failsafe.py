@@ -624,3 +624,41 @@ async def test_recovery_logs_info(hass, full_config_entry, caplog):
         await coordinator._async_check_recovery()
 
     assert any("återhämtning" in record.message.lower() for record in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Finding 5.1: INITIALIZING-guard — sensor unavailable under INITIALIZING
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sensor_unavailable_during_initializing_no_crash(hass, full_config_entry):
+    """Sensor unavailable under INITIALIZING ska INTE kasta ValueError.
+
+    enter_failsafe() kastar ValueError om anropas i INITIALIZING.
+    _async_handle_sensor_unavailable ska returnera tidigt utan undantag.
+    """
+    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
+        mock_debouncer_cls.return_value = MagicMock()
+        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+
+    # Mocka dispatcher
+    coordinator._dispatcher.send_amp = AsyncMock(return_value=True)
+    coordinator._dispatcher.pause = AsyncMock(return_value=True)
+
+    # Verifiera att state machine är i INITIALIZING (startläge)
+    assert coordinator.state == BalancerState.INITIALIZING
+
+    # Sätt en fassensor till "unavailable"
+    hass.states.async_set("sensor.current_l1", "unavailable")
+    hass.states.async_set("sensor.current_l2", "12.0")
+    hass.states.async_set("sensor.current_l3", "12.0")
+
+    # Anropa — ska INTE kasta ValueError
+    await coordinator._async_handle_sensor_unavailable()
+
+    # State ska fortfarande vara INITIALIZING (ingen övergång, inget undantag)
+    assert coordinator.state == BalancerState.INITIALIZING
+    # Inga dispatcher-kommandon ska ha skickats
+    coordinator._dispatcher.send_amp.assert_not_called()
+    coordinator._dispatcher.pause.assert_not_called()

@@ -339,6 +339,10 @@ class EVLoadBalancerCoordinator:
         if current_sm_state == BalancerState.FAILSAFE:
             return
 
+        # Failsafe ej tillämpligt under INITIALIZING (sensorer ej stabila ännu)
+        if current_sm_state == BalancerState.INITIALIZING:
+            return
+
         if unavailable_count == total_count:
             # Total sensorförlust — alltid pausa, oavsett konfiguration
             _LOGGER.critical(

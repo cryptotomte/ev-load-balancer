@@ -521,9 +521,12 @@ class EVLoadBalancerOptionsFlow(OptionsFlow):
         if user_input is not None:
             min_c = int(user_input[CONF_MIN_CURRENT])
             max_c = int(user_input[CONF_MAX_CURRENT])
+            safe_c = int(user_input[CONF_SAFE_DEFAULT_CURRENT])
 
             if max_c < min_c:
                 errors[CONF_MAX_CURRENT] = "max_less_than_min"
+            elif safe_c < 6 or safe_c > 16:
+                errors[CONF_SAFE_DEFAULT_CURRENT] = "safe_current_out_of_range"
             else:
                 # Slå ihop phases (från föregående steg) och parametrar
                 return self.async_create_entry(
@@ -534,7 +537,7 @@ class EVLoadBalancerOptionsFlow(OptionsFlow):
                         CONF_MAX_CURRENT: max_c,
                         CONF_PHASE_COUNT: user_input[CONF_PHASE_COUNT],
                         CONF_ACTION_ON_SENSOR_LOSS: user_input[CONF_ACTION_ON_SENSOR_LOSS],
-                        CONF_SAFE_DEFAULT_CURRENT: int(user_input[CONF_SAFE_DEFAULT_CURRENT]),
+                        CONF_SAFE_DEFAULT_CURRENT: safe_c,
                     }
                 )
 

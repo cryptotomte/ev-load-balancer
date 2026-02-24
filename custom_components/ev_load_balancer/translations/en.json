@@ -90,7 +90,8 @@
     "error": {
       "no_phases": "At least one phase sensor (L1) must be configured.",
       "duplicate_phase_sensors": "The same sensor cannot be used for multiple phases. Each phase must have a unique current sensor.",
-      "max_less_than_min": "Maximum charge current must be at least as large as minimum charge current."
+      "max_less_than_min": "Maximum charge current must be at least as large as minimum charge current.",
+      "safe_current_out_of_range": "Safe default current must be between 6 and 16 A"
     }
   },
   "selector": {
