@@ -74,3 +74,17 @@ SENSOR_AVAILABLE_MIN = "available_min"
 
 SENSOR_TARGET_CURRENT = "target_current"
 """Beräknad målström — sensorns ID suffix."""
+
+# --- Failsafe-konstanter (PR-05) ---
+
+CONF_ACTION_ON_SENSOR_LOSS = "action_on_sensor_loss"
+"""Nyckel för vald åtgärd vid sensorförlust ('reduce' eller 'pause')."""
+
+CONF_SAFE_DEFAULT_CURRENT = "safe_default_current"
+"""Nyckel för säker standardström i ampere vid reduce-åtgärd."""
+
+DEFAULT_SAFE_CURRENT = 6
+"""Standardström i ampere vid failsafe-reduce (IEC 61851 minimum)."""
+
+DEFAULT_SENSOR_LOSS_ACTION = "reduce"
+"""Standardåtgärd vid enskild sensorförlust ('reduce' eller 'pause')."""
