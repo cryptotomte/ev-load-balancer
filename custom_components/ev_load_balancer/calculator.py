@@ -129,6 +129,9 @@ def calculate(
         phase_loads=list(phase_values[:n]),
         device_loads=list(device_values[:n]),
         charging_mode=charging_mode,
+        # Alla 3 faser inkluderas alltid som metadata (även vid 1-fas-installation).
+        # PhaseSwitcher använder alla faser för att bedöma fasväxlingsmöjligheter.
+        # Konsumenter förlitar sig inte på antalet entries.
         available_per_phase={
             "l1": available[0],
             "l2": available[1],

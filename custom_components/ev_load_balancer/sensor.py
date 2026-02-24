@@ -59,6 +59,7 @@ from .const import (
     SENSOR_STATUS,
     SENSOR_TARGET_CURRENT,
 )
+from .charger_profiles import PROFILES
 from .hysteresis import HysteresisAction, HysteresisController
 from .phase_switcher import PhaseMode, PhaseSwitcher
 from .state_machine import BalancerState, LoadBalancerStateMachine
@@ -154,8 +155,6 @@ class EVLoadBalancerCoordinator:
         self._phase_switcher = PhaseSwitcher(min_current=self._min_current)
 
         # Kontrollera om laddarens profil stödjer fasväxling
-        from .charger_profiles import PROFILES
-
         profile = PROFILES.get(self._profile_id)
         self._supports_phase_switching = (
             profile is not None and "phase_switching" in profile.capabilities

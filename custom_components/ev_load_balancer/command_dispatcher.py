@@ -105,7 +105,7 @@ class CommandDispatcher:
             )
             return False
 
-    async def send_psm(self, value: str) -> bool:
+    async def send_psm(self, value: str, *, blocking: bool = False) -> bool:
         """Skicka fasväxlingskommando till laddarens psm-entitet.
 
         Anropar HA-tjänsten select.select_option med det givna alternativet.
@@ -115,6 +115,7 @@ class CommandDispatcher:
         Args:
             value: Alternativ att välja — "1" (1-fas) eller "2" (3-fas).
                    Använd PSM_VALUE_1PHASE och PSM_VALUE_3PHASE från const.py.
+            blocking: Om True väntar tjänsteanropet på bekräftelse (default False).
 
         Returns:
             True om kommandot skickades utan fel, annars False.
@@ -128,7 +129,7 @@ class CommandDispatcher:
                 "select",
                 "select_option",
                 {"entity_id": self._psm_entity, "option": value},
-                blocking=False,
+                blocking=blocking,
             )
             _LOGGER.debug("Skickade psm='%s' till %s", value, self._psm_entity)
             return True
