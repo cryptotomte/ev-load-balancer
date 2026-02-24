@@ -101,7 +101,8 @@
           "max_current": "Maximum charge current (A)",
           "phase_count": "Phase count",
           "action_on_sensor_loss": "Action on sensor loss",
-          "safe_default_current": "Safe default current on sensor loss (A)"
+          "safe_default_current": "Safe default current on sensor loss (A)",
+          "capacity_warning_threshold": "Capacity warning threshold (A)"
         }
       }
     },
@@ -117,6 +118,18 @@
       "options": {
         "reduce": "Reduce to safe default current",
         "pause": "Pause charging"
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "utilization": {
+        "name": "Utilization"
+      }
+    },
+    "binary_sensor": {
+      "capacity_warning": {
+        "name": "Capacity Warning"
       }
     }
   }

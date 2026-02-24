@@ -13,7 +13,7 @@ from .const import CONF_PROFILE_ID, DOMAIN
 _LOGGER = logging.getLogger(__name__)
 
 # Plattformar som integrationen exponerar
-PLATFORMS = [Platform.SENSOR]
+PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

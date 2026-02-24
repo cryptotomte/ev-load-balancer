@@ -28,6 +28,7 @@ from homeassistant.helpers.selector import (
 from .charger_profiles import PROFILES
 from .const import (
     CONF_ACTION_ON_SENSOR_LOSS,
+    CONF_CAPACITY_WARNING_THRESHOLD,
     CONF_CHARGER_ENTITIES,
     CONF_MAX_CURRENT,
     CONF_MIN_CURRENT,
@@ -37,6 +38,7 @@ from .const import (
     CONF_SAFE_DEFAULT_CURRENT,
     CONF_SAFETY_MARGIN,
     CONF_SERIAL,
+    DEFAULT_CAPACITY_WARNING_THRESHOLD,
     DEFAULT_MAX_CURRENT,
     DEFAULT_MIN_CURRENT,
     DEFAULT_PHASE_COUNT,
@@ -538,6 +540,9 @@ class EVLoadBalancerOptionsFlow(OptionsFlow):
                         CONF_PHASE_COUNT: user_input[CONF_PHASE_COUNT],
                         CONF_ACTION_ON_SENSOR_LOSS: user_input[CONF_ACTION_ON_SENSOR_LOSS],
                         CONF_SAFE_DEFAULT_CURRENT: safe_c,
+                        CONF_CAPACITY_WARNING_THRESHOLD: int(
+                            user_input[CONF_CAPACITY_WARNING_THRESHOLD]
+                        ),
                     }
                 )
 
@@ -565,6 +570,10 @@ class EVLoadBalancerOptionsFlow(OptionsFlow):
         default_safe_current = existing_options.get(
             CONF_SAFE_DEFAULT_CURRENT,
             existing_data.get(CONF_SAFE_DEFAULT_CURRENT, DEFAULT_SAFE_CURRENT),
+        )
+        default_capacity_warning = existing_options.get(
+            CONF_CAPACITY_WARNING_THRESHOLD,
+            existing_data.get(CONF_CAPACITY_WARNING_THRESHOLD, DEFAULT_CAPACITY_WARNING_THRESHOLD),
         )
 
         schema = vol.Schema(
@@ -632,6 +641,18 @@ class EVLoadBalancerOptionsFlow(OptionsFlow):
                     NumberSelectorConfig(
                         min=6,
                         max=16,
+                        step=1,
+                        unit_of_measurement="A",
+                        mode=NumberSelectorMode.BOX,
+                    )
+                ),
+                vol.Required(
+                    CONF_CAPACITY_WARNING_THRESHOLD,
+                    default=default_capacity_warning,
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=1,
+                        max=10,
                         step=1,
                         unit_of_measurement="A",
                         mode=NumberSelectorMode.BOX,
