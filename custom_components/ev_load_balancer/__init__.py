@@ -42,10 +42,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         model=entry.data.get(CONF_PROFILE_ID, "generic"),
     )
 
+    # Registrera lyssnare som laddar om integrationen vid OptionsFlow-ändringar
+    entry.async_on_unload(entry.add_update_listener(_async_update_options))
+
     # Sätt upp sensor-plattformen
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     return True
+
+
+async def _async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Ladda om integrationen när options ändras via OptionsFlow."""
+    _LOGGER.debug("Options ändrade — laddar om integrationen")
+    await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
