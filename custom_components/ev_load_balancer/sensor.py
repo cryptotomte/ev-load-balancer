@@ -37,6 +37,7 @@ from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.util.dt import utcnow
 
 from .calculator import CalculationResult, calculate
+from .charger_profiles import PROFILES
 from .command_dispatcher import CommandDispatcher
 from .const import (
     CONF_ACTION_ON_SENSOR_LOSS,
@@ -66,6 +67,7 @@ from .const import (
     PAUSE_DELAY_SECONDS,
     PSM_VALUE_1PHASE,
     PSM_VALUE_3PHASE,
+    PSM_VALUE_AUTO,
     RESUME_DELAY_SECONDS,
     RESUME_THRESHOLD_OFFSET,
     SENSOR_AVAILABLE_L1,
@@ -76,7 +78,6 @@ from .const import (
     SENSOR_TARGET_CURRENT,
     SENSOR_UTILIZATION,
 )
-from .charger_profiles import PROFILES
 from .hysteresis import HysteresisAction, HysteresisController
 from .phase_switcher import PhaseMode, PhaseSwitcher
 from .state_machine import BalancerState, LoadBalancerStateMachine
@@ -425,6 +426,22 @@ class EVLoadBalancerCoordinator:
         - Faskarta (map)
         - Laddarens ström per fas (nrg_4, nrg_5, nrg_6)
         """
+        # Sätt PSM auto vid uppstart — låter laddaren och bilen förhandla fritt.
+        # Enfas-only bilar (PHEV) kan starta laddning utan manuell PSM-override.
+        psm_sent = await self._dispatcher.send_psm(PSM_VALUE_AUTO)
+        if psm_sent:
+            _LOGGER.info("PSM satt till auto (0) vid uppstart")
+        else:
+            _LOGGER.warning(
+                "Kunde inte sätta PSM auto vid uppstart — psm-entitet saknas/unavailable"
+            )
+
+        # Läs initial fasläge från pha-sensor och sätt på phase_switcher.
+        # Ersätter hårdkodad THREE_PHASE-default med faktisk fasdata.
+        initial_phases = self._read_active_phases_sync()
+        self._phase_switcher.set_initial_mode(initial_phases)
+        _LOGGER.debug("Initial fasläge satt baserat på: %s", initial_phases)
+
         # Samla alla entitets-ID:n att bevaka
         entities_to_track: list[str] = []
 
@@ -434,7 +451,7 @@ class EVLoadBalancerCoordinator:
                 entities_to_track.append(sensor_id)
 
         # Laddar-entiteter att bevaka
-        for key in ("car_value", "map", "nrg_4", "nrg_5", "nrg_6"):
+        for key in ("car_value", "map", "pha", "nrg_4", "nrg_5", "nrg_6"):
             entity_id = self._charger_entities.get(key, "")
             if entity_id:
                 entities_to_track.append(entity_id)
@@ -693,11 +710,36 @@ class EVLoadBalancerCoordinator:
         return device_values
 
     def _read_active_phases_sync(self) -> list[int]:
-        """Läs aktiva fasnummer från map-sensor synkront.
+        """Läs aktiva fasnummer synkront med prioritetsordning: pha → map → fallback.
 
-        Returnerar lista med fasnummer, eller fallback till alla konfigurerade faser
-        om map-sensorn är unavailable.
+        Prioritetsordning:
+        1. pha-sensor: faktiska faser efter kontaktorn (go-e API, JSON-array)
+        2. map-sensor: faskarta som speglar PSM-inställningen
+        3. Fallback: alla konfigurerade faser
+
+        Returnerar lista med fasnummer (1-baserat), t.ex. [1] eller [1, 2, 3].
         """
+        # --- Prioritet 1: pha-sensor (faktisk fasanvändning efter kontaktorn) ---
+        pha_entity = self._charger_entities.get("pha", "")
+        if pha_entity:
+            state = self.hass.states.get(pha_entity)
+            if state and state.state not in ("unavailable", "unknown", ""):
+                try:
+                    pha = json.loads(state.state)
+                    if isinstance(pha, list) and len(pha) >= 3:
+                        # pha[0:3] = faser efter kontaktorn (till bilen)
+                        active = [i + 1 for i, v in enumerate(pha[0:3]) if v]
+                        if active:
+                            _LOGGER.debug("Aktiva faser: %s (källa: pha)", active)
+                            return active
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    _LOGGER.warning(
+                        "pha-sensor '%s' har ogiltigt värde '%s' — faller tillbaka på map",
+                        pha_entity,
+                        state.state,
+                    )
+
+        # --- Prioritet 2: map-sensor (speglar PSM-inställningen) ---
         map_entity = self._charger_entities.get("map", "")
         if map_entity:
             state = self.hass.states.get(map_entity)
@@ -705,7 +747,9 @@ class EVLoadBalancerCoordinator:
                 try:
                     parsed = json.loads(state.state)
                     if isinstance(parsed, list):
-                        return [int(x) for x in parsed]
+                        active = [int(x) for x in parsed]
+                        _LOGGER.debug("Aktiva faser: %s (källa: map)", active)
+                        return active
                 except (json.JSONDecodeError, ValueError, TypeError):
                     _LOGGER.warning(
                         "Map-sensor '%s' har ogiltigt värde '%s' — faller tillbaka till alla faser",
@@ -713,8 +757,10 @@ class EVLoadBalancerCoordinator:
                         state.state,
                     )
 
-        # Fallback: alla konfigurerade faser
-        return list(range(1, len(self._phases) + 1))
+        # --- Prioritet 3: Fallback — alla konfigurerade faser ---
+        fallback = list(range(1, len(self._phases) + 1))
+        _LOGGER.debug("Aktiva faser: %s (källa: fallback)", fallback)
+        return fallback
 
     async def _async_calculate(self) -> None:
         """Asynkron beräkning — läser HA-state, kör calculator, skickar kommandon.
@@ -934,9 +980,9 @@ class EVLoadBalancerCoordinator:
                         {
                             "new_current": cmd.amp,
                             "available_per_phase": [
-                                result.available_l1,
-                                result.available_l2,
-                                result.available_l3,
+                                result.charger_budget_l1,
+                                result.charger_budget_l2,
+                                result.charger_budget_l3,
                             ],
                         },
                     )
@@ -1136,11 +1182,12 @@ class AvailableCurrentSensor(_EVSensorBase):
     _attr_native_unit_of_measurement = UnitOfElectricCurrent.AMPERE
 
     # Mappning fas-etikett → attributnamn i CalculationResult
+    # Visar fuse_headroom (faktisk säkringsmarginal) — inte charger_budget
     _PHASE_ATTR: dict[str, str] = {
-        "l1": "available_l1",
-        "l2": "available_l2",
-        "l3": "available_l3",
-        "min": "available_min",
+        "l1": "fuse_headroom_l1",
+        "l2": "fuse_headroom_l2",
+        "l3": "fuse_headroom_l3",
+        "min": "fuse_headroom_min",
     }
 
     def __init__(

@@ -79,6 +79,20 @@ class PhaseSwitcher:
         """Returnerar aktuellt fasläge."""
         return self._current_mode
 
+    def set_initial_mode(self, active_phase_numbers: list[int]) -> None:
+        """Sätter initial fasläge baserat på faktiska aktiva faser.
+
+        Anropas av koordinatorn under setup, efter att pha-sensor lästs.
+        Ersätter hårdkodad THREE_PHASE-default i __init__.
+
+        Args:
+            active_phase_numbers: Lista med aktiva fasnummer (t.ex. [1] eller [1,2,3]).
+        """
+        if len(active_phase_numbers) == 1:
+            self._current_mode = PhaseMode.ONE_PHASE
+        else:
+            self._current_mode = PhaseMode.THREE_PHASE
+
     def set_device_capability(self, supports_3phase: bool) -> None:
         """Sätt laddarens 3-fas-kapabilitet.
 

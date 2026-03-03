@@ -189,6 +189,12 @@ _GOE_GEMINI_PROFILE = ChargerProfile(
             unit="A",
             description="Tillgänglig ström (bekräftad av laddaren)",
         ),
+        "pha": SensorDef(
+            entity_pattern="sensor.goe_{serial}_pha",
+            platform="sensor",
+            unit="",
+            description="Aktiverade faser efter kontaktorn (JSON-array med 6 booleans)",
+        ),
     },
     controls={
         # T015: Alla 4 styrningsentiteter

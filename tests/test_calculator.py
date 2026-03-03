@@ -43,9 +43,9 @@ def test_scenario1_3phase_target_14a():
         nrg_4=10A, nrg_5=10A, nrg_6=10A
 
     Beräkning:
-        available_l1 = 25 - (18.3 - 10) - 2 = 14.7A
-        available_l2 = 25 - (12.1 - 10) - 2 = 20.9A
-        available_l3 = 25 - (15.7 - 10) - 2 = 17.3A
+        charger_budget_l1 = 25 - (18.3 - 10) - 2 = 14.7A
+        charger_budget_l2 = 25 - (12.1 - 10) - 2 = 20.9A
+        charger_budget_l3 = 25 - (15.7 - 10) - 2 = 17.3A
         available_min = min(14.7, 20.9, 17.3) = 14.7A
         target = floor(14.7) = 14A
     """
@@ -60,9 +60,9 @@ def test_scenario1_3phase_target_14a():
     )
 
     assert result.target_current == 14
-    assert abs(result.available_l1 - 14.7) < 0.001
-    assert abs(result.available_l2 - 20.9) < 0.001
-    assert abs(result.available_l3 - 17.3) < 0.001
+    assert abs(result.charger_budget_l1 - 14.7) < 0.001
+    assert abs(result.charger_budget_l2 - 20.9) < 0.001
+    assert abs(result.charger_budget_l3 - 17.3) < 0.001
     assert abs(result.available_min - 14.7) < 0.001
     assert result.active_phases == [1, 2, 3]
     assert result.charging_mode == "3-phase"
@@ -89,7 +89,7 @@ def test_scenario2_1phase_l2_target_8a():
         nrg_5=0A (1-fas, rapporterar 0A)
 
     Beräkning:
-        available_l2 = 16 - (6 - 0) - 2 = 8A
+        charger_budget_l2 = 16 - (6 - 0) - 2 = 8A
         available_min = min(8) = 8A
         target = floor(8) = 8A
     """
@@ -104,7 +104,7 @@ def test_scenario2_1phase_l2_target_8a():
     )
 
     assert result.target_current == 8
-    assert abs(result.available_l2 - 8.0) < 0.001
+    assert abs(result.charger_budget_l2 - 8.0) < 0.001
     assert abs(result.available_min - 8.0) < 0.001
     assert result.active_phases == [2]
     assert result.charging_mode == "1-phase"
@@ -147,7 +147,7 @@ def test_map_unavailable_fallback_all_phases():
 
 def test_result_clamped_to_min_current():
     """Om beräknat värde < min_current kläms target till min_current."""
-    # available_l1 = 25 - (24 - 0) - 2 = -1A → floor(-1) = -1 → kläm till 6
+    # charger_budget_l1 = 25 - (24 - 0) - 2 = -1A → floor(-1) = -1 → kläm till 6
     result = calculate(
         phases=PHASES_3,
         phase_values=[24.0, 24.0, 24.0],
@@ -159,7 +159,7 @@ def test_result_clamped_to_min_current():
     )
 
     assert result.target_current == 6
-    assert result.available_l1 < 0
+    assert result.charger_budget_l1 < 0
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +190,7 @@ def test_result_clamped_to_max_current():
 
 def test_negative_phase_sensor_value():
     """Negativt fassensorvärde hanteras korrekt (ger extra kapacitet)."""
-    # available_l1 = 25 - (-2 - 0) - 2 = 25 + 2 - 2 = 25A → kläm till 16
+    # charger_budget_l1 = 25 - (-2 - 0) - 2 = 25 + 2 - 2 = 25A → kläm till 16
     result = calculate(
         phases=[{"sensor": "s.l1", "max_ampere": 25, "label": "L1"}],
         phase_values=[-2.0],
@@ -308,3 +308,35 @@ def test_calculation_time_is_set():
     )
 
     assert isinstance(result.calculation_time, datetime)
+
+
+# ---------------------------------------------------------------------------
+# PR-09: fuse_headroom vs charger_budget (US3)
+# ---------------------------------------------------------------------------
+
+
+def test_fuse_headroom_differs_from_charger_budget():
+    """fuse_headroom och charger_budget ska ge olika värden under aktiv laddning.
+
+    Scenario: BE1=17,5A (inkl. 16A laddning), fuse=25A, margin=2A, nrg=16A
+
+    charger_budget_l1 = 25 - (17.5 - 16) - 2 = 21.5A  (laddarens interna budget)
+    fuse_headroom_l1  = 25 - 17.5 - 2         = 5.5A   (faktisk säkringsmarginal)
+    fuse_headroom_min = 5.5A                            (aktiv fas = L1)
+    """
+    from pytest import approx
+
+    phases = [{"sensor": "sensor.be1", "max_ampere": 25, "label": "L1"}]
+    result = calculate(
+        phases=phases,
+        phase_values=[17.5],
+        device_values=[16.0],
+        active_phase_numbers=[1],
+        safety_margin=2.0,
+        min_current=6,
+        max_current=25,
+    )
+
+    assert result.charger_budget_l1 == approx(21.5)
+    assert result.fuse_headroom_l1 == approx(5.5)
+    assert result.fuse_headroom_min == approx(5.5)

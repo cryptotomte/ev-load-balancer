@@ -61,6 +61,9 @@ RESUME_THRESHOLD_OFFSET = 2
 PHASE_SWITCH_UPSCALE_DELAY = 60
 """Sekunder med alla faser >= min_current innan uppväxling 1→3 fas sker."""
 
+PSM_VALUE_AUTO = "0"
+"""PSM select-värde för auto-förhandling med bilen (laddaren väljer fas självständigt)."""
+
 PSM_VALUE_1PHASE = "1"
 """PSM select-värde för 1-fas laddning."""
 
