@@ -348,3 +348,32 @@ def test_phase_switch_command_is_frozen():
     )
     with pytest.raises((AttributeError, TypeError)):
         cmd.action = "other"  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# PR-09: set_initial_mode() — initial fasläge utan THREE_PHASE-default
+# ---------------------------------------------------------------------------
+
+
+def test_phase_switcher_no_three_phase_default():
+    """set_initial_mode() ska sätta initial fasläge baserat på faktiska aktiva faser.
+
+    - set_initial_mode([1]) → ONE_PHASE (enfas-only bil, t.ex. PHEV)
+    - set_initial_mode([1, 2, 3]) → THREE_PHASE (normal trefas-bil)
+    """
+    switcher = PhaseSwitcher(min_current=MIN_CURRENT)
+
+    # Enfas: pha visar bara L1 aktiv
+    switcher.set_initial_mode([1])
+    assert switcher.current_mode == PhaseMode.ONE_PHASE
+
+    # Trefas: pha visar alla tre faser aktiva
+    switcher.set_initial_mode([1, 2, 3])
+    assert switcher.current_mode == PhaseMode.THREE_PHASE
+
+
+def test_phase_switcher_set_initial_mode_empty_list_gives_three_phase():
+    """set_initial_mode([]) ska fallbacka till THREE_PHASE (tom lista = 0 != 1)."""
+    switcher = PhaseSwitcher(min_current=MIN_CURRENT)
+    switcher.set_initial_mode([])
+    assert switcher.current_mode == PhaseMode.THREE_PHASE

@@ -81,9 +81,9 @@ def _make_result(available_min: float) -> CalculationResult:
     """Hjälpfunktion: skapa CalculationResult med givet available_min."""
     return CalculationResult(
         target_current=8,
-        available_l1=available_min,
-        available_l2=available_min,
-        available_l3=available_min,
+        charger_budget_l1=available_min,
+        charger_budget_l2=available_min,
+        charger_budget_l3=available_min,
         available_min=available_min,
         active_phases=[1, 2, 3],
         phase_loads=[10.0, 10.0, 10.0],

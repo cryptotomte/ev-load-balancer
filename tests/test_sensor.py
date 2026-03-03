@@ -336,11 +336,13 @@ async def test_available_sensors_updated_after_calculation(hass, full_config_ent
     min_sensor = AvailableCurrentSensor(coordinator, "min")
     target_sensor = TargetCurrentSensor(coordinator)
 
-    # PRD §9 Scenario 1: available_l1=14.7, target=14A
-    assert abs(l1_sensor.native_value - 14.7) < 0.01
-    assert abs(l2_sensor.native_value - 20.9) < 0.01
-    assert abs(l3_sensor.native_value - 17.3) < 0.01
-    assert abs(min_sensor.native_value - 14.7) < 0.01
+    # PRD §9 Scenario 1: fuse_headroom_l1 = 25 - 18.3 - 2 = 4.7, target=14A
+    # Available-sensorerna visar fuse_headroom (faktisk säkringsmarginal),
+    # inte charger_budget (laddarens interna budget = 14.7A)
+    assert abs(l1_sensor.native_value - 4.7) < 0.01
+    assert abs(l2_sensor.native_value - 10.9) < 0.01
+    assert abs(l3_sensor.native_value - 7.3) < 0.01
+    assert abs(min_sensor.native_value - 4.7) < 0.01
     assert target_sensor.native_value == 14
 
 
@@ -1254,9 +1256,9 @@ def _make_result(available_min: float, active_phases: list | None = None) -> Cal
     """Hjälpfunktion: skapa CalculationResult med given available_min."""
     return CalculationResult(
         target_current=8,
-        available_l1=available_min,
-        available_l2=available_min,
-        available_l3=available_min,
+        charger_budget_l1=available_min,
+        charger_budget_l2=available_min,
+        charger_budget_l3=available_min,
         available_min=available_min,
         active_phases=active_phases if active_phases is not None else [1, 2, 3],
         phase_loads=[10.0, 10.0, 10.0],
@@ -1655,9 +1657,9 @@ def test_utilization_sensor_with_1_active_phase(full_config_entry):
     # 1 aktiv fas = L2 (index 1, max_ampere=25)
     coordinator.last_result = CalculationResult(
         target_current=10,
-        available_l1=20.0,
-        available_l2=10.0,  # L2 är aktivt
-        available_l3=20.0,
+        charger_budget_l1=20.0,
+        charger_budget_l2=10.0,  # L2 är aktivt
+        charger_budget_l3=20.0,
         available_min=10.0,
         active_phases=[2],  # Bara L2 aktiv
         phase_loads=[5.0, 15.0, 5.0],
@@ -1678,9 +1680,9 @@ def test_utilization_sensor_returns_none_for_no_active_phases(full_config_entry)
     coordinator = _make_coordinator(full_config_entry)
     coordinator.last_result = CalculationResult(
         target_current=6,
-        available_l1=20.0,
-        available_l2=20.0,
-        available_l3=20.0,
+        charger_budget_l1=20.0,
+        charger_budget_l2=20.0,
+        charger_budget_l3=20.0,
         available_min=20.0,
         active_phases=[],  # Inga aktiva faser
         phase_loads=[5.0, 5.0, 5.0],
@@ -1721,3 +1723,129 @@ async def test_utilization_sensor_updates_after_calculation(hass, full_config_en
     # available_min = 18A, max_ampere = 25A → utnyttjandegrad = (25-18)/25*100 = 28%
     assert value is not None
     assert abs(value - 28.0) < 1.0
+
+
+# ---------------------------------------------------------------------------
+# PR-09: PSM auto vid uppstart
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_coordinator_sends_psm_auto_on_setup(hass, full_config_entry):
+    """Koordinatorn ska skicka PSM='0' (auto) som första kommando i async_setup().
+
+    Verifiera att send_psm anropas med PSM_VALUE_AUTO='0' under setup.
+    """
+    from custom_components.ev_load_balancer.const import PSM_VALUE_AUTO
+
+    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
+        mock_debouncer = MagicMock()
+        mock_debouncer.async_schedule_call = MagicMock()
+        mock_debouncer_cls.return_value = mock_debouncer
+        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+
+    # Mocka send_psm för att fånga anropet
+    coordinator._dispatcher.send_psm = AsyncMock(return_value=True)
+
+    await coordinator.async_setup()
+
+    # Verifiera att send_psm anropades med PSM_VALUE_AUTO ('0')
+    coordinator._dispatcher.send_psm.assert_called_once_with(PSM_VALUE_AUTO)
+
+
+# ---------------------------------------------------------------------------
+# PR-09: pha-sensor läsning i _read_active_phases_sync()
+# ---------------------------------------------------------------------------
+
+
+def test_read_active_phases_uses_pha_when_available(hass):
+    """_read_active_phases_sync() ska använda pha-sensor när den är tillgänglig.
+
+    pha=[true, false, false, true, true, true] → aktiva faser = [1]
+    (pha[0]=true, pha[1]=false, pha[2]=false → fas 1 aktiv, fas 2+3 inaktiva)
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="EV Load Balancer Test",
+        data={
+            "profile_id": "goe_gemini",
+            "serial": "409787",
+            "charger_entities": {
+                "amp": "number.goe_409787_amp",
+                "frc": "select.goe_409787_frc",
+                "psm": "select.goe_409787_psm",
+                "car_value": "sensor.goe_409787_car_value",
+                "nrg_4": "sensor.goe_409787_nrg_4",
+                "nrg_5": "sensor.goe_409787_nrg_5",
+                "nrg_6": "sensor.goe_409787_nrg_6",
+                "map": "sensor.goe_409787_map",
+                "pha": "sensor.goe_409787_pha",
+            },
+            "phases": [
+                {"sensor": "sensor.current_l1", "max_ampere": 25, "label": "L1"},
+                {"sensor": "sensor.current_l2", "max_ampere": 25, "label": "L2"},
+                {"sensor": "sensor.current_l3", "max_ampere": 25, "label": "L3"},
+            ],
+            "safety_margin": 2,
+            "min_current": 6,
+            "max_current": 16,
+        },
+    )
+
+    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
+        mock_debouncer_cls.return_value = MagicMock()
+        coordinator = EVLoadBalancerCoordinator(hass, entry)
+
+    # Sätt pha-sensorn: L1 aktiv, L2+L3 inaktiva (PHEV-liknande)
+    hass.states.async_set("sensor.goe_409787_pha", "[true, false, false, true, true, true]")
+    # Sätt map-sensorn (ska INTE användas eftersom pha är tillgänglig)
+    hass.states.async_set("sensor.goe_409787_map", "[1, 2, 3]")
+
+    result = coordinator._read_active_phases_sync()
+    assert result == [1]
+
+
+def test_read_active_phases_falls_back_to_map(hass):
+    """_read_active_phases_sync() ska falla tillbaka på map om pha är unavailable.
+
+    pha=unavailable → faller tillbaka → map='[2]' → aktiva faser = [2]
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="EV Load Balancer Test",
+        data={
+            "profile_id": "goe_gemini",
+            "serial": "409787",
+            "charger_entities": {
+                "amp": "number.goe_409787_amp",
+                "frc": "select.goe_409787_frc",
+                "psm": "select.goe_409787_psm",
+                "car_value": "sensor.goe_409787_car_value",
+                "nrg_4": "sensor.goe_409787_nrg_4",
+                "nrg_5": "sensor.goe_409787_nrg_5",
+                "nrg_6": "sensor.goe_409787_nrg_6",
+                "map": "sensor.goe_409787_map",
+                "pha": "sensor.goe_409787_pha",
+            },
+            "phases": [
+                {"sensor": "sensor.current_l1", "max_ampere": 25, "label": "L1"},
+                {"sensor": "sensor.current_l2", "max_ampere": 25, "label": "L2"},
+                {"sensor": "sensor.current_l3", "max_ampere": 25, "label": "L3"},
+            ],
+            "safety_margin": 2,
+            "min_current": 6,
+            "max_current": 16,
+        },
+    )
+
+    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
+        mock_debouncer_cls.return_value = MagicMock()
+        coordinator = EVLoadBalancerCoordinator(hass, entry)
+
+    # pha-sensorn är unavailable — faller tillbaka på map
+    hass.states.async_set("sensor.goe_409787_pha", "unavailable")
+    # map-sensor rapporterar fas 2 (1-fas laddning via L2)
+    hass.states.async_set("sensor.goe_409787_map", "[2]")
+
+    result = coordinator._read_active_phases_sync()
+    assert result == [2]

@@ -92,11 +92,11 @@ def test_resolve_raises_on_empty_serial():
 # ---------------------------------------------------------------------------
 
 
-def test_goe_gemini_has_11_sensors_and_4_controls():
-    """goe_gemini ska ha exakt 11 sensorer och 4 kontroller."""
+def test_goe_gemini_has_12_sensors_and_4_controls():
+    """goe_gemini ska ha exakt 12 sensorer (inkl. pha) och 4 kontroller."""
     profile = PROFILES["goe_gemini"]
 
-    assert len(profile.sensors) == 11
+    assert len(profile.sensors) == 12
     assert len(profile.controls) == 4
 
 
