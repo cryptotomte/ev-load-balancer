@@ -30,6 +30,7 @@ from homeassistant.components.sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE, UnitOfElectricCurrent
 from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.helpers import start as ha_start
 from homeassistant.helpers.debounce import Debouncer
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -426,21 +427,22 @@ class EVLoadBalancerCoordinator:
         - Faskarta (map)
         - Laddarens ström per fas (nrg_4, nrg_5, nrg_6)
         """
-        # Sätt PSM auto vid uppstart — låter laddaren och bilen förhandla fritt.
-        # Enfas-only bilar (PHEV) kan starta laddning utan manuell PSM-override.
-        psm_sent = await self._dispatcher.send_psm(PSM_VALUE_AUTO)
-        if psm_sent:
-            _LOGGER.info("PSM satt till auto (0) vid uppstart")
-        else:
-            _LOGGER.warning(
-                "Kunde inte sätta PSM auto vid uppstart — psm-entitet saknas/unavailable"
-            )
 
-        # Läs initial fasläge från pha-sensor och sätt på phase_switcher.
-        # Ersätter hårdkodad THREE_PHASE-default med faktisk fasdata.
-        initial_phases = self._read_active_phases_sync()
-        self._phase_switcher.set_initial_mode(initial_phases)
-        _LOGGER.debug("Initial fasläge satt baserat på: %s", initial_phases)
+        # Skjut upp PSM auto + initial fasläge till efter att HA är fullt uppstartat.
+        # select.select_option-tjänsten är ej tillgänglig under setup (timing-issue).
+        async def _init_after_ha_start(_hass: HomeAssistant) -> None:
+            psm_sent = await self._dispatcher.send_psm(PSM_VALUE_AUTO)
+            if psm_sent:
+                _LOGGER.info("PSM satt till auto (0) vid uppstart")
+            else:
+                _LOGGER.warning(
+                    "Kunde inte sätta PSM auto vid uppstart — psm-entitet saknas/unavailable"
+                )
+            initial_phases = self._read_active_phases_sync()
+            self._phase_switcher.set_initial_mode(initial_phases)
+            _LOGGER.debug("Initial fasläge satt baserat på: %s", initial_phases)
+
+        ha_start.async_at_started(self.hass, _init_after_ha_start)
 
         # Samla alla entitets-ID:n att bevaka
         entities_to_track: list[str] = []
