@@ -1,7 +1,7 @@
 {
   "domain": "ev_load_balancer",
   "name": "EV Load Balancer",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "documentation": "https://github.com/cryptotomte/ev-load-balancer",
   "issue_tracker": "https://github.com/cryptotomte/ev-load-balancer/issues",
   "codeowners": ["@cryptotomte"],
