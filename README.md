@@ -8,6 +8,8 @@ modes and charger profiles. MVP: go-e Gemini flex.
 [![HACS Badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 [![Validate](https://github.com/cryptotomte/ev-load-balancer/actions/workflows/validate.yaml/badge.svg)](https://github.com/cryptotomte/ev-load-balancer/actions/workflows/validate.yaml)
 
+![Device page showing all sensors](docs/images/integration_page.png)
+
 ---
 
 ## Features
@@ -40,16 +42,16 @@ Current per phase at the fuse
     │         Calculation             │
     │                                 │
     │  Available per phase:           │
-    │  L1: 25 - 2 (margin) - 18.3    │
+    │  L1: 25 - 2 (margin) - 18.3     │
     │     = 4.7 A                     │
-    │  L2: 25 - 2 - 12.1 = 10.9 A    │
-    │  L3: 25 - 2 - 15.7 = 7.3 A     │
+    │  L2: 25 - 2 - 12.1 = 10.9 A     │
+    │  L3: 25 - 2 - 15.7 = 7.3 A      │
     │                                 │
     │  available_min = min(4.7,       │
     │    10.9, 7.3) = 4.7 A           │
     │                                 │
     │  target_current = floor(4.7)    │
-    │    = 4 → clamped to [6, 16] A  │
+    │    = 4 → clamped to [6, 16] A   │
     └─────────────────────────────────┘
             │
             ▼
@@ -74,6 +76,11 @@ Current per phase at the fuse
 > **Simplification:** The diagram above shows a simplification — the actual calculation
 > subtracts the charger's own draw (`device_load`) from the phase load before calculating
 > available capacity: `max_a - (phase_load - device_load) - safety_margin`.
+
+The status sensor exposes all calculation details as attributes — useful for debugging
+and dashboard cards:
+
+![Status sensor attributes](docs/images/status_sensor_attributes.png)
 
 ### Calculation logic (step by step)
 
@@ -198,6 +205,10 @@ Settings can be adjusted afterwards without having to remove and recreate the in
 - **Capacity warning threshold** — limit in Ampere for warning sensor (default 3A)
 
 Open Options Flow via: **Settings** → **Devices & Services** → **EV Load Balancer** → ⚙️
+
+| Phase sensors | Calculation parameters |
+|---|---|
+| ![Phase sensors](docs/images/config_flow_step_1.png) | ![Calculation parameters](docs/images/config_flow_step_2.png) |
 
 ---
 

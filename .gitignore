@@ -7,6 +7,7 @@ specs/
 # Docs: ignore everything except public charger-profiles
 docs/*
 !docs/charger-profiles/
+!docs/images/
 
 # Python
 .venv/
@@ -19,3 +20,6 @@ uv.lock
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+
+# macOS
+.DS_Store
