@@ -7,6 +7,5 @@
   "codeowners": ["@cryptotomte"],
   "config_flow": true,
   "iot_class": "calculated",
-  "requirements": [],
-  "homeassistant": "2024.1.0"
+  "requirements": []
 }
