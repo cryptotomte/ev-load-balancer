@@ -46,6 +46,11 @@ A charger profile is a configuration in `charger_profiles.py` that describes:
 | `map` | Phase map (read-only) | `sensor` — internal phase mapping |
 | `car_value` | Car connection status | `sensor` — optional status info |
 
+> **Without `nrg_4/5/6`** the balancer can never prove that the household load has gone
+> down: it sends a first value when the car is plugged in (or after a restart), and after
+> that the current is only ever reduced, never raised, and charging never resumes after a
+> pause. A profile meant for normal use should define them.
+
 ### Control values for frc
 
 The profile must specify which select values correspond to "pause" and "charge":

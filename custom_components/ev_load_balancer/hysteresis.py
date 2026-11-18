@@ -111,6 +111,7 @@ class HysteresisController:
         last_sent_amp: int,
         is_paused: bool,
         now: datetime,
+        up_ceiling: int | None,
     ) -> HysteresisCommand:
         """Utvärdera aktuellt tillstånd och returnera lämpligt kommando.
 
@@ -119,7 +120,8 @@ class HysteresisController:
         2. Nedreglering (target < last_sent): skicka omedelbart.
         3. Kapacitetsbrist (available_min < min): starta/fortsätt paus-timer.
         4. Tillräcklig kapacitet (available_min >= min): nollställ paus-timer.
-        5. Uppreglering (target > last_sent): skicka om cooldown passerat.
+        5. Uppreglering (target > last_sent): skicka högst up_ceiling om
+           cooldown passerat.
         6. Oförändrat (target == last_sent): ingen åtgärd.
 
         Args:
@@ -128,13 +130,17 @@ class HysteresisController:
             last_sent_amp: Senast bekräftad laddström (A).
             is_paused: True om laddaren är pausad.
             now: Aktuell tidpunkt.
+            up_ceiling: Högsta ström en höjning eller återstart får gå till
+                (spec 010 K-4, D-14): målet med den högsta skattningen under
+                hålltiden, eller None om senaste mätvärdet inte var entydigt.
+                Påverkar inte sänkning eller paus.
 
         Returns:
             HysteresisCommand med åtgärd och eventuell ström.
         """
         # --- Prioritet 1: PAUSED-läge — hantera resume ---
         if is_paused:
-            return self._evaluate_paused(available_min, target_current, now)
+            return self._evaluate_paused(available_min, target_current, now, up_ceiling)
 
         # --- Prioritet 2: Nedreglering — skicka omedelbart ---
         if target_current < last_sent_amp:
@@ -173,21 +179,31 @@ class HysteresisController:
         # Tillräcklig kapacitet — nollställ paus-timer
         self._below_min_since = None
 
-        # --- Prioritet 5: Uppreglering med cooldown ---
+        # --- Prioritet 5: Uppreglering med tak och cooldown ---
         if target_current > last_sent_amp:
+            raised = min(target_current, up_ceiling) if up_ceiling is not None else last_sent_amp
+            if raised <= last_sent_amp:
+                return HysteresisCommand(
+                    action=HysteresisAction.NONE,
+                    amp=None,
+                    reason=(
+                        f"Uppreglering till {target_current}A spärrad av hålltid "
+                        f"eller otydligt mätvärde (tak {up_ceiling}A)"
+                    ),
+                )
             if self._last_amp_change_time is None:
                 return HysteresisCommand(
                     action=HysteresisAction.SET_AMP,
-                    amp=target_current,
-                    reason=f"Uppreglering (ingen tidigare amp-ändring): → {target_current}A",
+                    amp=raised,
+                    reason=f"Uppreglering (ingen tidigare amp-ändring): → {raised}A",
                 )
             elapsed_cooldown = (now - self._last_amp_change_time).total_seconds()
             if elapsed_cooldown >= self._cooldown:
                 return HysteresisCommand(
                     action=HysteresisAction.SET_AMP,
-                    amp=target_current,
+                    amp=raised,
                     reason=(
-                        f"Uppreglering: {last_sent_amp}A → {target_current}A "
+                        f"Uppreglering: {last_sent_amp}A → {raised}A "
                         f"(cooldown {elapsed_cooldown:.1f}s >= {self._cooldown}s)"
                     ),
                 )
@@ -212,13 +228,19 @@ class HysteresisController:
         available_min: float,
         target_current: int,
         now: datetime,
+        up_ceiling: int | None,
     ) -> HysteresisCommand:
         """Hantera utvärdering i PAUSED-läge.
+
+        Återstarten begränsas av samma tak som höjningar (D-14, R-6): aldrig
+        över taket, inte på ett otydligt mätvärde och inte när taket är under
+        min_current. Resume-timern löper vidare medan taket spärrar.
 
         Args:
             available_min: Oklämd minsta tillgängliga ström (A).
             target_current: Klämd beräknad målström (A).
             now: Aktuell tidpunkt.
+            up_ceiling: Taket från evaluate().
 
         Returns:
             HysteresisCommand med RESUME eller NONE.
@@ -230,11 +252,19 @@ class HysteresisController:
 
             elapsed = (now - self._above_resume_since).total_seconds()
             if elapsed >= self._resume_delay:
+                if up_ceiling is None or up_ceiling < self._min_current:
+                    return HysteresisCommand(
+                        action=HysteresisAction.NONE,
+                        amp=None,
+                        reason=(
+                            f"Resume spärrad av hålltid eller otydligt mätvärde (tak {up_ceiling}A)"
+                        ),
+                    )
                 # Nollställ resume-timer för nästa paus/resume-cykel
                 self._above_resume_since = None
                 return HysteresisCommand(
                     action=HysteresisAction.RESUME,
-                    amp=target_current,
+                    amp=min(target_current, up_ceiling),
                     reason=(
                         f"Resume: available_min={available_min:.1f}A >= "
                         f"threshold={self._resume_threshold}A i {elapsed:.0f}s"

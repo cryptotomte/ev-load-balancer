@@ -48,6 +48,16 @@ VALID_PHASES = {
     "phase_2_sensor": SENSOR_L2,
     "phase_2_max_ampere": 25,
 }
+ADVANCED_DEFAULTS = {"estimate_window_seconds": 15, "up_hold_seconds": 90}
+VALID_PARAMS = {
+    "safety_margin": 2,
+    "min_current": 6,
+    "max_current": 16,
+    "phase_count": "auto",
+    "action_on_sensor_loss": "reduce",
+    "safe_default_current": 6,
+    "capacity_warning_threshold": 3,
+}
 MAX_LESS_THAN_MIN = {
     "safety_margin": 2,
     "min_current": 16,
@@ -128,7 +138,168 @@ async def test_options_flow_forms_serializable(
             "action_on_sensor_loss": "reduce",
             "safe_default_current": 6,
             "capacity_warning_threshold": 3,
+            "advanced": ADVANCED_DEFAULTS,
         },
         "params",
     )
     assert result["errors"] == {"max_current": "max_less_than_min"}
+
+
+async def _options_params_step(hass: HomeAssistant, client, entry) -> tuple[str, dict]:
+    """Open the options flow and post valid phases; return the params step URL and form."""
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    result = await _post(client, _OPTIONS_FLOW, {"handler": entry.entry_id}, "phases")
+    step = f"{_OPTIONS_FLOW}/{result['flow_id']}"
+    return step, await _post(client, step, VALID_PHASES, "params")
+
+
+async def test_t16_advanced_section_collapsed_and_saved_flat(
+    hass: HomeAssistant, client, mock_config_entry
+) -> None:
+    """T-16: the params form has a collapsed "advanced" section; values are stored flat."""
+    step, form = await _options_params_step(hass, client, mock_config_entry)
+
+    section = next(field for field in form["data_schema"] if field["name"] == "advanced")
+    assert section["type"] == "expandable"
+    assert section["expanded"] is False
+    defaults = {field["name"]: field["default"] for field in section["schema"]}
+    assert defaults == ADVANCED_DEFAULTS
+
+    resp = await client.post(
+        step,
+        json={**VALID_PARAMS, "advanced": {"estimate_window_seconds": 20, "up_hold_seconds": 120}},
+    )
+    assert resp.status == HTTPStatus.OK, await resp.text()
+    assert (await resp.json())["type"] == FlowResultType.CREATE_ENTRY
+    assert mock_config_entry.options["estimate_window_seconds"] == 20
+    assert mock_config_entry.options["up_hold_seconds"] == 120
+    # F-6: the two K-9 keys are the only new options
+    assert set(mock_config_entry.options) == {
+        "phases",
+        "safety_margin",
+        "min_current",
+        "max_current",
+        "phase_count",
+        "action_on_sensor_loss",
+        "safe_default_current",
+        "capacity_warning_threshold",
+        "estimate_window_seconds",
+        "up_hold_seconds",
+    }
+
+
+@pytest.mark.parametrize(
+    ("advanced", "error"),
+    [
+        ({"estimate_window_seconds": 2, "up_hold_seconds": 90}, "estimate_window_out_of_range"),
+        ({"estimate_window_seconds": 31, "up_hold_seconds": 90}, "estimate_window_out_of_range"),
+        ({"estimate_window_seconds": 15, "up_hold_seconds": -1}, "up_hold_out_of_range"),
+        ({"estimate_window_seconds": 15, "up_hold_seconds": 601}, "up_hold_out_of_range"),
+    ],
+)
+async def test_t19_out_of_range_shows_form_again(
+    hass: HomeAssistant, client, mock_config_entry, advanced, error
+) -> None:
+    """T-19: a value outside the allowed range re-shows the form with an error; nothing is saved."""
+    step, _ = await _options_params_step(hass, client, mock_config_entry)
+
+    result = await _post(client, step, {**VALID_PARAMS, "advanced": advanced}, "params")
+
+    assert result["errors"] == {"advanced": error}
+    assert "estimate_window_seconds" not in mock_config_entry.options
+    assert "up_hold_seconds" not in mock_config_entry.options
+
+
+@pytest.mark.parametrize(("window", "hold"), [(3, 600), (30, 0)])
+async def test_t19_range_limits_are_accepted(
+    hass: HomeAssistant, client, mock_config_entry, window, hold
+) -> None:
+    """T-19: the range limits themselves (3 and 30 s, D-15; 0 and 600 s) are allowed."""
+    step, _ = await _options_params_step(hass, client, mock_config_entry)
+
+    resp = await client.post(
+        step,
+        json={
+            **VALID_PARAMS,
+            "advanced": {"estimate_window_seconds": window, "up_hold_seconds": hold},
+        },
+    )
+
+    assert (await resp.json())["type"] == FlowResultType.CREATE_ENTRY
+    assert mock_config_entry.options["estimate_window_seconds"] == window
+    assert mock_config_entry.options["up_hold_seconds"] == hold
+
+
+@pytest.mark.parametrize(
+    ("advanced", "error"),
+    [
+        ({"estimate_window_seconds": 15.5, "up_hold_seconds": 90}, "estimate_window_out_of_range"),
+        ({"estimate_window_seconds": 15, "up_hold_seconds": 90.5}, "up_hold_out_of_range"),
+        ({"estimate_window_seconds": 2, "up_hold_seconds": 601}, "advanced_out_of_range"),
+        ({"estimate_window_seconds": 15.5, "up_hold_seconds": -1}, "advanced_out_of_range"),
+    ],
+    ids=["window_not_whole", "hold_not_whole", "both_out_of_range", "both_wrong"],
+)
+async def test_advanced_non_integer_and_both_fields_give_form_error(
+    hass: HomeAssistant, client, mock_config_entry, advanced, error
+) -> None:
+    """13.3: a non-integer is a form error, not silently truncated; both fields are
+
+    checked and an error in both is shown at once. Nothing is saved.
+    """
+    step, _ = await _options_params_step(hass, client, mock_config_entry)
+
+    result = await _post(client, step, {**VALID_PARAMS, "advanced": advanced}, "params")
+
+    assert result["errors"] == {"advanced": error}
+    assert "estimate_window_seconds" not in mock_config_entry.options
+
+
+async def test_advanced_error_is_shown_with_other_field_errors(
+    hass: HomeAssistant, client, mock_config_entry
+) -> None:
+    """13.3: an error in the section does not hide an error in another field, or vice versa."""
+    step, _ = await _options_params_step(hass, client, mock_config_entry)
+
+    result = await _post(
+        client,
+        step,
+        {
+            **VALID_PARAMS,
+            "min_current": 16,
+            "max_current": 6,
+            "advanced": {"estimate_window_seconds": 31, "up_hold_seconds": 90},
+        },
+        "params",
+    )
+
+    assert result["errors"] == {
+        "max_current": "max_less_than_min",
+        "advanced": "estimate_window_out_of_range",
+    }
+
+
+@pytest.mark.parametrize("value", ["abc", None])
+async def test_advanced_non_number_is_rejected_without_server_error(
+    hass: HomeAssistant, client, mock_config_entry, value
+) -> None:
+    """13.3 / A-11: a non-number fails Home Assistant's own selector validation.
+
+    The view answers HTTP 400 with the error for the form (not 500), and nothing
+    is saved.
+    """
+    step, _ = await _options_params_step(hass, client, mock_config_entry)
+
+    resp = await client.post(
+        step,
+        json={
+            **VALID_PARAMS,
+            "advanced": {"estimate_window_seconds": value, "up_hold_seconds": 90},
+        },
+    )
+
+    assert resp.status == HTTPStatus.BAD_REQUEST, await resp.text()
+    assert "errors" in await resp.json()
+    assert "estimate_window_seconds" not in mock_config_entry.options

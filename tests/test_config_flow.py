@@ -432,6 +432,7 @@ async def test_options_flow_phases_changeable(hass, mock_config_entry):
             "min_current": 6.0,
             "max_current": 16.0,
             "phase_count": "auto",
+            "advanced": {"estimate_window_seconds": 15, "up_hold_seconds": 90},
         },
     )
 
@@ -490,6 +491,7 @@ async def test_options_flow_max_less_than_min_blocked(hass, mock_config_entry):
             "min_current": 16.0,
             "max_current": 6.0,  # max < min!
             "phase_count": "auto",
+            "advanced": {"estimate_window_seconds": 15, "up_hold_seconds": 90},
         },
     )
 

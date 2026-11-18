@@ -8,6 +8,7 @@ Ren Python utan HA-beroenden — fullt testbar med vanlig pytest (Princip V).
 Regler:
 - Nedväxling 3→1: Om någon fas < min_current och L2 har kapacitet
 - Uppväxling 1→3: Om alla faser >= min_current i 60s (PHASE_SWITCH_UPSCALE_DELAY)
+- Ingen fasväxling inom PHASE_SWITCH_MIN_DWELL efter föregående (spec 010 K-5)
 - PHEV-skydd: Om device_supports_3phase=False → returnera alltid None
 - go-e Gemini använder L2 vid 1-fas laddning (bekräftat i PRD)
 """
@@ -18,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
-from .const import PHASE_SWITCH_UPSCALE_DELAY
+from .const import PHASE_SWITCH_MIN_DWELL, PHASE_SWITCH_UPSCALE_DELAY
 
 
 class PhaseMode(StrEnum):
@@ -73,6 +74,7 @@ class PhaseSwitcher:
         self._device_supports_3phase = True
         # Timer: tidpunkt när alla faser senast gick över min_current (1-fas → 3-fas)
         self._all_phases_ok_since: datetime | None = None
+        self._last_switch: datetime | None = None
 
     @property
     def current_mode(self) -> PhaseMode:
@@ -114,6 +116,8 @@ class PhaseSwitcher:
 
         Beslutslogik:
         1. PHEV-skydd: Om device_supports_3phase=False → returnera None.
+           Inom PHASE_SWITCH_MIN_DWELL efter senaste växling → returnera None
+           (K-5); kapacitetsbrist hanteras då av ström och pauslogik.
         2. THREE_PHASE: Om någon fas < min_current → kontrollera L2.
            - L2 >= min_current → returnera switch_to_1phase.
            - L2 < min_current → returnera None (pauslogiken tar över).
@@ -131,6 +135,12 @@ class PhaseSwitcher:
         """
         # --- PHEV-skydd: laddaren stödjer inte 3-fas ---
         if not self._device_supports_3phase:
+            return None
+
+        if (
+            self._last_switch is not None
+            and (now - self._last_switch).total_seconds() < PHASE_SWITCH_MIN_DWELL
+        ):
             return None
 
         l1 = available_per_phase.get("l1", 0.0)
@@ -186,14 +196,17 @@ class PhaseSwitcher:
         self._all_phases_ok_since = None
         return None
 
-    def record_mode_change(self, new_mode: PhaseMode) -> None:
+    def record_mode_change(self, new_mode: PhaseMode, now: datetime) -> None:
         """Registrera att en fasväxling genomfördes.
 
-        Uppdaterar current_mode och nollställer hysteres-timer.
-        Ska anropas av koordinatorn direkt efter att PSM-kommandot skickats.
+        Uppdaterar current_mode, nollställer hysteres-timer och startar
+        uppehållstiden (K-5). Ska anropas av koordinatorn direkt efter att
+        PSM-kommandot skickats.
 
         Args:
             new_mode: Nytt fasläge efter fasväxlingen.
+            now: Tidpunkt för fasväxlingen.
         """
         self._current_mode = new_mode
         self._all_phases_ok_since = None
+        self._last_switch = now

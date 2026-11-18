@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+import pytest
+
 from custom_components.ev_load_balancer.hysteresis import (
     HysteresisAction,
     HysteresisController,
@@ -24,6 +26,7 @@ from custom_components.ev_load_balancer.hysteresis import (
 # ---------------------------------------------------------------------------
 
 MIN_CURRENT = 6
+MAX_CURRENT = 16
 RESUME_OFFSET = 2
 PAUSE_DELAY = 15.0
 RESUME_DELAY = 30.0
@@ -58,6 +61,7 @@ def test_immediate_downregulation():
         last_sent_amp=14,
         is_paused=False,
         now=T0,
+        up_ceiling=MAX_CURRENT,
     )
     assert cmd.action == HysteresisAction.SET_AMP
     assert cmd.amp == 10
@@ -76,6 +80,7 @@ def test_downregulation_does_not_require_cooldown():
         last_sent_amp=14,
         is_paused=False,
         now=T0 + timedelta(seconds=0.1),
+        up_ceiling=MAX_CURRENT,
     )
     assert cmd.action == HysteresisAction.SET_AMP
     assert cmd.amp == 10
@@ -101,6 +106,7 @@ def test_downregulation_resets_pause_timer():
         last_sent_amp=14,
         is_paused=False,
         now=T0 + timedelta(seconds=5),
+        up_ceiling=MAX_CURRENT,
     )
     assert ctrl._below_min_since is None
 
@@ -121,6 +127,7 @@ def test_no_pause_before_delay():
         last_sent_amp=6,
         is_paused=False,
         now=T0,
+        up_ceiling=MAX_CURRENT,
     )
     assert cmd.action == HysteresisAction.NONE
 
@@ -131,6 +138,7 @@ def test_no_pause_before_delay():
         last_sent_amp=6,
         is_paused=False,
         now=T0 + timedelta(seconds=14.9),
+        up_ceiling=MAX_CURRENT,
     )
     assert cmd.action == HysteresisAction.NONE
 
@@ -146,6 +154,7 @@ def test_pause_after_delay():
         last_sent_amp=6,
         is_paused=False,
         now=T0,
+        up_ceiling=MAX_CURRENT,
     )
 
     # T=15s: timer expired → PAUSE
@@ -155,6 +164,7 @@ def test_pause_after_delay():
         last_sent_amp=6,
         is_paused=False,
         now=T0 + timedelta(seconds=15),
+        up_ceiling=MAX_CURRENT,
     )
     assert cmd.action == HysteresisAction.PAUSE
     assert cmd.amp is None
@@ -171,6 +181,7 @@ def test_pause_timer_resets_when_capacity_returns():
         last_sent_amp=6,
         is_paused=False,
         now=T0,
+        up_ceiling=MAX_CURRENT,
     )
     assert ctrl._below_min_since is not None
 
@@ -181,6 +192,7 @@ def test_pause_timer_resets_when_capacity_returns():
         last_sent_amp=6,
         is_paused=False,
         now=T0 + timedelta(seconds=10),
+        up_ceiling=MAX_CURRENT,
     )
     assert ctrl._below_min_since is None
 
@@ -191,6 +203,7 @@ def test_pause_timer_resets_when_capacity_returns():
         last_sent_amp=6,
         is_paused=False,
         now=T0 + timedelta(seconds=11),
+        up_ceiling=MAX_CURRENT,
     )
 
     # T=24s (11+13s): under min i 13s sedan ny timer — ingen paus ännu
@@ -200,6 +213,7 @@ def test_pause_timer_resets_when_capacity_returns():
         last_sent_amp=6,
         is_paused=False,
         now=T0 + timedelta(seconds=24),
+        up_ceiling=MAX_CURRENT,
     )
     assert cmd.action == HysteresisAction.NONE
 
@@ -221,6 +235,7 @@ def test_no_resume_before_delay():
         last_sent_amp=6,
         is_paused=True,
         now=T0,
+        up_ceiling=MAX_CURRENT,
     )
     assert cmd.action == HysteresisAction.NONE
 
@@ -231,6 +246,7 @@ def test_no_resume_before_delay():
         last_sent_amp=6,
         is_paused=True,
         now=T0 + timedelta(seconds=29.9),
+        up_ceiling=MAX_CURRENT,
     )
     assert cmd.action == HysteresisAction.NONE
 
@@ -247,6 +263,7 @@ def test_resume_after_delay():
         last_sent_amp=6,
         is_paused=True,
         now=T0,
+        up_ceiling=MAX_CURRENT,
     )
 
     # T=30s: timer expired → RESUME
@@ -256,6 +273,7 @@ def test_resume_after_delay():
         last_sent_amp=6,
         is_paused=True,
         now=T0 + timedelta(seconds=30),
+        up_ceiling=MAX_CURRENT,
     )
     assert cmd.action == HysteresisAction.RESUME
     assert cmd.amp == 10
@@ -273,6 +291,7 @@ def test_resume_timer_resets_when_capacity_drops():
         last_sent_amp=6,
         is_paused=True,
         now=T0,
+        up_ceiling=MAX_CURRENT,
     )
     assert ctrl._above_resume_since is not None
 
@@ -283,6 +302,7 @@ def test_resume_timer_resets_when_capacity_drops():
         last_sent_amp=6,
         is_paused=True,
         now=T0 + timedelta(seconds=15),
+        up_ceiling=MAX_CURRENT,
     )
     assert cmd.action == HysteresisAction.NONE
     assert ctrl._above_resume_since is None
@@ -294,6 +314,7 @@ def test_resume_timer_resets_when_capacity_drops():
         last_sent_amp=6,
         is_paused=True,
         now=T0 + timedelta(seconds=16),
+        up_ceiling=MAX_CURRENT,
     )
 
     # T=44s (16+28s): timer löpt 28s sedan restart → ingen resume ännu
@@ -303,6 +324,7 @@ def test_resume_timer_resets_when_capacity_drops():
         last_sent_amp=6,
         is_paused=True,
         now=T0 + timedelta(seconds=44),
+        up_ceiling=MAX_CURRENT,
     )
     assert cmd.action == HysteresisAction.NONE
 
@@ -322,6 +344,7 @@ def test_upregulation_without_previous_change():
         last_sent_amp=8,
         is_paused=False,
         now=T0,
+        up_ceiling=MAX_CURRENT,
     )
     assert cmd.action == HysteresisAction.SET_AMP
     assert cmd.amp == 12
@@ -340,6 +363,7 @@ def test_upregulation_blocked_during_cooldown():
         last_sent_amp=8,
         is_paused=False,
         now=T0 + timedelta(seconds=4.9),
+        up_ceiling=MAX_CURRENT,
     )
     assert cmd.action == HysteresisAction.NONE
 
@@ -356,6 +380,7 @@ def test_upregulation_allowed_after_cooldown():
         last_sent_amp=8,
         is_paused=False,
         now=T0 + timedelta(seconds=5),
+        up_ceiling=MAX_CURRENT,
     )
     assert cmd.action == HysteresisAction.SET_AMP
     assert cmd.amp == 12
@@ -375,6 +400,7 @@ def test_no_command_when_target_equals_last_sent():
         last_sent_amp=10,
         is_paused=False,
         now=T0,
+        up_ceiling=MAX_CURRENT,
     )
     assert cmd.action == HysteresisAction.NONE
     assert cmd.amp is None
@@ -390,6 +416,7 @@ def test_no_command_when_target_equals_last_sent_with_cooldown():
         last_sent_amp=8,
         is_paused=False,
         now=T0,
+        up_ceiling=MAX_CURRENT,
     )
     assert cmd.action == HysteresisAction.NONE
 
@@ -410,6 +437,7 @@ def test_reset_clears_all_timers():
         last_sent_amp=6,
         is_paused=False,
         now=T0,
+        up_ceiling=MAX_CURRENT,
     )
     # Registrera amp-ändring
     ctrl.record_amp_change(T0)
@@ -421,6 +449,7 @@ def test_reset_clears_all_timers():
         last_sent_amp=6,
         is_paused=True,
         now=T0 + timedelta(seconds=1),
+        up_ceiling=MAX_CURRENT,
     )
 
     assert (
@@ -454,6 +483,7 @@ def test_after_reset_upregulation_is_immediate():
         last_sent_amp=8,
         is_paused=False,
         now=T0 + timedelta(seconds=0.1),
+        up_ceiling=MAX_CURRENT,
     )
     assert cmd.action == HysteresisAction.SET_AMP
     assert cmd.amp == 12
@@ -483,6 +513,7 @@ def test_resume_requires_above_threshold_not_min():
         last_sent_amp=6,
         is_paused=True,
         now=T0,
+        up_ceiling=MAX_CURRENT,
     )
     assert ctrl._above_resume_since is None
 
@@ -493,6 +524,7 @@ def test_resume_requires_above_threshold_not_min():
         last_sent_amp=6,
         is_paused=True,
         now=T0 + timedelta(seconds=1),
+        up_ceiling=MAX_CURRENT,
     )
     assert ctrl._above_resume_since is not None
 
@@ -513,6 +545,7 @@ def test_paused_mode_ignores_downregulation():
         last_sent_amp=14,  # target(6) < last_sent(14) men vi är PAUSED
         is_paused=True,
         now=T0,
+        up_ceiling=MAX_CURRENT,
     )
     # PAUSED-logik ska ignorera nedreglering
     assert cmd.action == HysteresisAction.NONE
@@ -528,6 +561,7 @@ def test_paused_mode_ignores_upregulation():
         last_sent_amp=6,  # target(10) > last_sent(6) men vi är PAUSED
         is_paused=True,
         now=T0,
+        up_ceiling=MAX_CURRENT,
     )
     assert cmd.action == HysteresisAction.NONE
 
@@ -557,6 +591,7 @@ def test_rapid_pause_resume_cycle_requires_full_resume_delay():
         last_sent_amp=6,
         is_paused=False,
         now=T0,
+        up_ceiling=MAX_CURRENT,
     )
 
     # T=15s: paus-timer expired → PAUSE
@@ -566,6 +601,7 @@ def test_rapid_pause_resume_cycle_requires_full_resume_delay():
         last_sent_amp=6,
         is_paused=False,
         now=T0 + timedelta(seconds=15),
+        up_ceiling=MAX_CURRENT,
     )
     assert cmd.action == HysteresisAction.PAUSE
 
@@ -577,6 +613,7 @@ def test_rapid_pause_resume_cycle_requires_full_resume_delay():
         last_sent_amp=6,
         is_paused=True,
         now=T0 + timedelta(seconds=15),
+        up_ceiling=MAX_CURRENT,
     )
     assert cmd.action == HysteresisAction.NONE  # Timer precis startad
 
@@ -587,6 +624,7 @@ def test_rapid_pause_resume_cycle_requires_full_resume_delay():
         last_sent_amp=6,
         is_paused=True,
         now=T0 + timedelta(seconds=30),
+        up_ceiling=MAX_CURRENT,
     )
     assert cmd.action == HysteresisAction.NONE  # 15s av 30s
 
@@ -597,6 +635,7 @@ def test_rapid_pause_resume_cycle_requires_full_resume_delay():
         last_sent_amp=6,
         is_paused=True,
         now=T0 + timedelta(seconds=45),
+        up_ceiling=MAX_CURRENT,
     )
     assert cmd.action == HysteresisAction.RESUME
     assert cmd.amp == 10
@@ -618,6 +657,7 @@ def test_evaluate_does_not_set_last_amp_change_time():
         last_sent_amp=8,
         is_paused=False,
         now=T0,
+        up_ceiling=MAX_CURRENT,
     )
     assert cmd.action == HysteresisAction.SET_AMP
     assert ctrl._last_amp_change_time is None  # koordinatorn ska sätta detta
@@ -630,3 +670,119 @@ def test_record_amp_change_sets_time():
 
     ctrl.record_amp_change(T0)
     assert ctrl._last_amp_change_time == T0
+
+
+# ---------------------------------------------------------------------------
+# Spec 010 K-4: up_ceiling caps increases only
+# ---------------------------------------------------------------------------
+
+
+def test_up_ceiling_caps_increase():
+    """An increase goes no higher than up_ceiling (hold-time target, K-4)."""
+    ctrl = make_controller()
+    cmd = ctrl.evaluate(
+        available_min=14.0,
+        target_current=14,
+        last_sent_amp=10,
+        is_paused=False,
+        now=T0,
+        up_ceiling=12,
+    )
+    assert cmd.action == HysteresisAction.SET_AMP
+    assert cmd.amp == 12
+
+
+def test_up_ceiling_at_last_sent_blocks_increase():
+    """With up_ceiling equal to last_sent_amp (ambiguous report) no increase is sent (F-3)."""
+    ctrl = make_controller()
+    cmd = ctrl.evaluate(
+        available_min=14.0,
+        target_current=14,
+        last_sent_amp=10,
+        is_paused=False,
+        now=T0,
+        up_ceiling=10,
+    )
+    assert cmd.action == HysteresisAction.NONE
+
+
+def test_up_ceiling_does_not_delay_reduction():
+    """A low up_ceiling never holds back a reduction (F-5)."""
+    ctrl = make_controller()
+    cmd = ctrl.evaluate(
+        available_min=9.0,
+        target_current=9,
+        last_sent_amp=14,
+        is_paused=False,
+        now=T0,
+        up_ceiling=6,
+    )
+    assert cmd.action == HysteresisAction.SET_AMP
+    assert cmd.amp == 9
+
+
+def test_resume_is_capped_by_up_ceiling():
+    """D-14 / R-6: resume after 30 s goes no higher than the hold-time ceiling."""
+    ctrl = make_controller()
+    ctrl.evaluate(
+        available_min=14.0,
+        target_current=14,
+        last_sent_amp=6,
+        is_paused=True,
+        now=T0,
+        up_ceiling=9,
+    )
+    cmd = ctrl.evaluate(
+        available_min=14.0,
+        target_current=14,
+        last_sent_amp=6,
+        is_paused=True,
+        now=T0 + timedelta(seconds=RESUME_DELAY),
+        up_ceiling=9,
+    )
+    assert cmd.action == HysteresisAction.RESUME
+    assert cmd.amp == 9
+
+
+@pytest.mark.parametrize("up_ceiling", [None, MIN_CURRENT - 1], ids=["ambiguous", "below_min"])
+def test_resume_waits_for_ceiling(up_ceiling):
+    """D-14 / R-6: no resume on an ambiguous sample or under a ceiling below min.
+
+    The resume timer keeps running, so resume follows as soon as the ceiling allows.
+    """
+    ctrl = make_controller()
+    for seconds in (0, RESUME_DELAY):
+        cmd = ctrl.evaluate(
+            available_min=14.0,
+            target_current=14,
+            last_sent_amp=6,
+            is_paused=True,
+            now=T0 + timedelta(seconds=seconds),
+            up_ceiling=up_ceiling,
+        )
+    assert cmd.action == HysteresisAction.NONE
+
+    cmd = ctrl.evaluate(
+        available_min=14.0,
+        target_current=14,
+        last_sent_amp=6,
+        is_paused=True,
+        now=T0 + timedelta(seconds=RESUME_DELAY + 1),
+        up_ceiling=12,
+    )
+    assert cmd.action == HysteresisAction.RESUME
+    assert cmd.amp == 12
+
+
+def test_ambiguous_sample_blocks_increase():
+    """K-4 / F-3: an up_ceiling of None (ambiguous sample) blocks every increase."""
+    ctrl = make_controller()
+    cmd = ctrl.evaluate(
+        available_min=14.0,
+        target_current=14,
+        last_sent_amp=8,
+        is_paused=False,
+        now=T0,
+        up_ceiling=None,
+    )
+    assert cmd.action == HysteresisAction.NONE

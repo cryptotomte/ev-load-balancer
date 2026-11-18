@@ -23,15 +23,15 @@ class CalculationResult:
     """Beräknad laddström i ampere — avrundad nedåt, klämd till [min, max]."""
 
     charger_budget_l1: float
-    """Laddarens budget på L1 (A): max_a - (phase_load - device_load) - margin.
+    """Laddarens budget på L1 (A): max_a - household_load - margin.
     Kan vara negativ vid kapacitetsbrist. Används internt för target_current-beräkning."""
 
     charger_budget_l2: float
-    """Laddarens budget på L2 (A): max_a - (phase_load - device_load) - margin.
+    """Laddarens budget på L2 (A): max_a - household_load - margin.
     Kan vara negativ vid kapacitetsbrist. Används internt för target_current-beräkning."""
 
     charger_budget_l3: float
-    """Laddarens budget på L3 (A): max_a - (phase_load - device_load) - margin.
+    """Laddarens budget på L3 (A): max_a - household_load - margin.
     Kan vara negativ vid kapacitetsbrist. Används internt för target_current-beräkning."""
 
     available_min: float
@@ -78,6 +78,7 @@ class CalculationResult:
 def calculate(
     phases: list[dict],
     phase_values: list[float],
+    household_loads: list[float],
     device_values: list[float],
     active_phase_numbers: list[int],
     safety_margin: float,
@@ -87,7 +88,7 @@ def calculate(
     """Beräknar tillgänglig ström per fas och optimal target_current.
 
     Formel charger_budget per fas i (intern, driver target_current):
-        charger_budget_i = max_ampere_i - (phase_value_i - device_value_i) - safety_margin
+        charger_budget_i = max_ampere_i - household_load_i - safety_margin
 
     Formel fuse_headroom per fas i (för sensordisplay):
         fuse_headroom_i = max_ampere_i - phase_value_i - safety_margin
@@ -100,8 +101,12 @@ def calculate(
                 nycklarna "sensor", "max_ampere" och "label".
         phase_values: Fassensorvärden i samma ordning som phases (A).
                       Inkluderar laddarens uttag.
+        household_loads: Skattad hushållslast per fas i samma ordning (A),
+                         från LoadEstimator (spec 010 K-1). Fasvärde och
+                         laddarström från olika tidpunkter får inte dras
+                         från varandra här.
         device_values: Laddarens egna uttag per fas i samma ordning (A).
-                       Använd 0.0 om sensorn saknas (generic-profil).
+                       Används bara som metadata i resultatet.
         active_phase_numbers: Lista med aktiva fasnummer (1-baserat),
                               t.ex. [1, 2, 3] eller [2].
         safety_margin: Säkerhetsmarginal i ampere som subtraheras.
@@ -119,9 +124,7 @@ def calculate(
     for i in range(n):
         max_a = float(phases[i].get("max_ampere", 25))
         phase_load = phase_values[i] if i < len(phase_values) else 0.0
-        device_load = device_values[i] if i < len(device_values) else 0.0
-        # Intern budget: subtraherar laddarens eget uttag (oförändrad formel)
-        charger_budget[i] = max_a - (phase_load - device_load) - safety_margin
+        charger_budget[i] = max_a - household_loads[i] - safety_margin
         # Säkringsmarginal: visar vad som faktiskt är kvar på säkringen
         fuse_headroom[i] = max_a - phase_load - safety_margin
 
