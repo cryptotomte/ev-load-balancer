@@ -570,6 +570,54 @@ async def test_r5_upswitch_reduces_to_l2_l3_budget_before_psm(hass, freezer):
         await rig.stop()
 
 
+async def test_v2_upswitch_is_capped_by_hold_time_ceiling_on_added_phases(hass, freezer):
+    """V-2 / D-20: 1-phase at 16 A on L1; L3 household 14 A for 20 s, then 5 A.
+
+    When the up-switch comes ca 60 s later every phase allows 16 A at that
+    moment, but L3 had 14 A within the 90 s hold time: the current is first
+    reduced to 25 - 14 - 2 = 9 A, and only then psm is sent.
+    """
+    rig = Rig(hass, freezer)
+    coordinator = await rig.start(
+        phases=[20.5, 5.0, 14.0], charger=[15.5, 0.0, 0.0], amp="16", psm="1", pha=PHA_L1_ONLY
+    )
+    # The 1-phase mode is older than the dwell time (K-5).
+    coordinator._phase_switcher.record_mode_change(
+        coordinator.phase_switcher_mode, dt_util.utcnow() - timedelta(seconds=300)
+    )
+    try:
+        await _report_every_5s(rig, [20.5, 5.0, 14.0], 20)
+        await _report_every_5s(rig, [20.5, 5.0, 5.0], 60)
+        assert rig.psm == ["2"], rig.commands
+        # The first is the first command after setup (D-19).
+        assert rig.commands[:3] == [("amp", "16"), ("amp", "9"), ("psm", "2")], rig.commands
+    finally:
+        await rig.stop()
+
+
+async def test_v2_no_upswitch_while_hold_time_ceiling_is_below_min(hass, freezer):
+    """D-20 / A-18: L3 household 18 A for 20 s (ceiling 25 - 18 - 2 = 5 A < min 6 A).
+
+    The up-switch wanted 60 s after L3 drops is refused while 18 A is within the
+    90 s hold time; once it has left, the next attempt switches.
+    """
+    rig = Rig(hass, freezer)
+    coordinator = await rig.start(
+        phases=[20.5, 5.0, 18.0], charger=[15.5, 0.0, 0.0], amp="16", psm="1", pha=PHA_L1_ONLY
+    )
+    coordinator._phase_switcher.record_mode_change(
+        coordinator.phase_switcher_mode, dt_util.utcnow() - timedelta(seconds=300)
+    )
+    try:
+        await _report_every_5s(rig, [20.5, 5.0, 18.0], 20)
+        await _report_every_5s(rig, [20.5, 5.0, 5.0], 70)
+        assert rig.psm == [], rig.commands
+        await _report_every_5s(rig, [20.5, 5.0, 5.0], 60)
+        assert rig.psm == ["2"], rig.commands
+    finally:
+        await rig.stop()
+
+
 async def test_r6_resume_is_capped_by_hold_time_ceiling(hass, freezer):
     """R-6 / D-14: resume after a pause goes no higher than the hold-time ceiling.
 

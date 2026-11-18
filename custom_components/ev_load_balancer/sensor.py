@@ -1084,16 +1084,20 @@ class EVLoadBalancerCoordinator:
                 )
                 self.last_result = result
                 active_idx = list(range(n_phases))
-                if result.target_current < self._last_sent_amp:
+                # D-20 (V-2): faserna som kommer till får inte mer än hålltidens tak.
+                amp = min(
+                    result.target_current,
+                    self._hold_ceiling(now, phase_values, device_values, active_idx),
+                )
+                if amp < self._min_current:
+                    switch_allowed = False
+                elif amp < self._last_sent_amp:
                     switch_allowed = await self._async_set_amp(
                         now,
                         HysteresisCommand(
                             action=HysteresisAction.SET_AMP,
-                            amp=result.target_current,
-                            reason=(
-                                f"Före uppväxling 1→3: {self._last_sent_amp}A → "
-                                f"{result.target_current}A"
-                            ),
+                            amp=amp,
+                            reason=f"Före uppväxling 1→3: {self._last_sent_amp}A → {amp}A",
                         ),
                         result,
                         device_values,
