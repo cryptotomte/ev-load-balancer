@@ -6,8 +6,9 @@ production glue in sensor.py is what is tested, not a copy of it. Time is
 frozen and advanced in steps of ``DT`` seconds.
 
 Every case runs twice (fixture ``reports_unchanged``): with a meter integration
-that writes every read, and with one that writes only changed values, as
-measured in the reference installation (P-3 false, spec section 10).
+that writes every read, as measured in the reference installation (P-3 true,
+spec section 10), and with one that writes only changed values, a guarded case
+for other installations.
 """
 
 from __future__ import annotations
@@ -185,7 +186,7 @@ class ClosedLoop:
 
     def _write_phase(self, sensor: str, text: str) -> None:
         current = self.hass.states.get(sensor)
-        # P-3 false: an integration that only writes changed values.
+        # P-3 not met: an integration that only writes changed values.
         if self.reports_unchanged or current is None or current.state != text:
             self.hass.states.async_set(sensor, text)
 
@@ -299,9 +300,9 @@ def reports_unchanged(request) -> bool:
 
 # With a meter that writes only changed values, a phase whose value stays the same
 # after an own command keeps its last, ambiguous sample, and the clock may not make
-# it unambiguous (D-12). An increase after a load has gone then never comes. This
-# conflict between D-12 and "same criteria with P-3 false" (spec 13.3) is left to
-# the spec; the cases below show it.
+# it unambiguous (D-12). An increase after a load has gone then does not come while
+# that value stays the same. Decision D-18 (spec 13.5) keeps this as a documented
+# limitation for such meters; the cases below show it.
 INCREASE_AFTER_LOAD_GONE = [
     pytest.param(True, id="unchanged_reports"),
     pytest.param(
@@ -309,8 +310,8 @@ INCREASE_AFTER_LOAD_GONE = [
         id="changes_only",
         marks=pytest.mark.xfail(
             strict=True,
-            reason="spec 010: D-12 forbids the clock to make an estimate unambiguous; "
-            "with P-3 false an unchanged phase never gets a new sample",
+            reason="spec 010 D-18: the clock may not make an estimate unambiguous (D-12); "
+            "with a changes-only meter an unchanged phase never gets a new sample",
         ),
     ),
 ]

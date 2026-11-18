@@ -551,9 +551,9 @@ class EVLoadBalancerCoordinator:
             self._remove_listeners.append(remove_fn)
 
         # Ett oförändrat värde som skrivs igen (state_reported) är ett nytt mätvärde.
-        # P-3 är mätt falskt i referensinstallationen (spec 010 avsnitt 10): där
-        # skrivs bara ändrade värden, upp till 570 s isär. Regleringen beror därför
-        # inte på dessa rapporter; klockan (D-12) låter tidsvillkoren löpa ut.
+        # P-3 är mätt sant i referensinstallationen (spec 010 avsnitt 10: skrivning
+        # var 5:e sekund, nytt värde var 10:e). Andra mätare kan skriva bara ändrade
+        # värden, så tidsvillkoren beror inte på dessa rapporter utan på klockan (D-12).
         if self._phase_sensor_ids:
             self._remove_listeners.append(
                 async_track_state_report_event(
@@ -606,7 +606,8 @@ class EVLoadBalancerCoordinator:
         """Låt tidsvillkoren löpa ut även när inga mätvärden kommer (D-12, R-3).
 
         Paus, återstart, uppväxling, uppehållstid och hålltid prövas bara i en
-        beräkning, och fassensorn skriver inte oförändrade värden (P-3 falskt).
+        beräkning, och en fassensor som bara skriver ändrade värden ger ingen
+        beräkning så länge värdet står still (P-3 gäller inte alla mätare).
         Omräkningen behandlar ingen rapport, så den är inget mätvärde och gör
         ingen skattning entydig. Den går även i INITIALIZING (D-21), annars
         lämnas det läget inte förrän ett fasvärde ändras.

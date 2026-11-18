@@ -1030,7 +1030,7 @@ async def test_unload_before_home_assistant_started_sends_nothing(hass, freezer)
 async def test_t10_charger_changes_without_phase_report_send_nothing(hass, freezer):
     """T-10 / F-2: the charger drops from 15.5 A to 5.5 A while the meter writes nothing
 
-    new (P-3 false). For 40 s the clock recalculates; the old phase value is never
+    new (a changes-only meter). For 40 s the clock recalculates; the old phase value is never
     compared with the newer charger values, so nothing is sent. The old formula
     would give h = 20.5 - 5.5 = 15 A and reduce to 8 A.
     """
