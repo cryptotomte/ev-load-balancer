@@ -61,6 +61,35 @@ RESUME_THRESHOLD_OFFSET = 2
 PHASE_SWITCH_UPSCALE_DELAY = 60
 """Sekunder med alla faser >= min_current innan uppväxling 1→3 fas sker."""
 
+PHASE_SWITCH_MIN_DWELL = 300
+"""Sekunder efter en fasväxling då ingen ny fasväxling görs (spec 010 K-5, D-4)."""
+
+# --- Skattning av hushållslast (spec 010) ---
+
+CONF_ESTIMATE_WINDOW_SECONDS = "estimate_window_seconds"
+"""Nyckel i entry.options för mätfönstret W i sekunder (K-1, K-9)."""
+
+DEFAULT_ESTIMATE_WINDOW_SECONDS = 15
+"""Standardfönster: längre än ett fasvärde kan vara gammalt (D-2)."""
+
+ESTIMATE_WINDOW_RANGE = (3, 60)
+"""Tillåtet intervall för mätfönstret, sekunder (K-9)."""
+
+CONF_UP_HOLD_SECONDS = "up_hold_seconds"
+"""Nyckel i entry.options för hålltiden före höjning i sekunder (K-4, K-9)."""
+
+DEFAULT_UP_HOLD_SECONDS = 90
+"""Standard hålltid: längre än pausen mellan värmepumpens pulser (D-3)."""
+
+UP_HOLD_RANGE = (0, 600)
+"""Tillåtet intervall för hålltiden, sekunder (K-9)."""
+
+ESTIMATE_TIGHT_TOLERANCE = 0.5
+"""Största hög − låg (A) för att ett mätvärde ska räknas som entydigt (K-4)."""
+
+SAMPLE_COALESCE_SECONDS = 0.2
+"""Fasrapporter inom denna tid behandlas som ett mätvärde (K-6)."""
+
 PSM_VALUE_AUTO = "0"
 """PSM select-värde för auto-förhandling med bilen (laddaren väljer fas självständigt)."""
 
