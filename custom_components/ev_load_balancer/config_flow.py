@@ -12,6 +12,7 @@ from typing import Any
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult, OptionsFlow
 from homeassistant.core import callback
+from homeassistant.data_entry_flow import section
 from homeassistant.helpers.selector import (
     EntitySelector,
     EntitySelectorConfig,
@@ -30,6 +31,7 @@ from .const import (
     CONF_ACTION_ON_SENSOR_LOSS,
     CONF_CAPACITY_WARNING_THRESHOLD,
     CONF_CHARGER_ENTITIES,
+    CONF_ESTIMATE_WINDOW_SECONDS,
     CONF_MAX_CURRENT,
     CONF_MIN_CURRENT,
     CONF_PHASE_COUNT,
@@ -38,17 +40,25 @@ from .const import (
     CONF_SAFE_DEFAULT_CURRENT,
     CONF_SAFETY_MARGIN,
     CONF_SERIAL,
+    CONF_UP_HOLD_SECONDS,
     DEFAULT_CAPACITY_WARNING_THRESHOLD,
+    DEFAULT_ESTIMATE_WINDOW_SECONDS,
     DEFAULT_MAX_CURRENT,
     DEFAULT_MIN_CURRENT,
     DEFAULT_PHASE_COUNT,
     DEFAULT_SAFE_CURRENT,
     DEFAULT_SAFETY_MARGIN,
     DEFAULT_SENSOR_LOSS_ACTION,
+    DEFAULT_UP_HOLD_SECONDS,
     DOMAIN,
+    ESTIMATE_WINDOW_RANGE,
+    UP_HOLD_RANGE,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Hopfälld sektion i options-steget params (spec 010 K-9)
+SECTION_ADVANCED = "advanced"
 
 
 class EVLoadBalancerConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -524,11 +534,18 @@ class EVLoadBalancerOptionsFlow(OptionsFlow):
             min_c = int(user_input[CONF_MIN_CURRENT])
             max_c = int(user_input[CONF_MAX_CURRENT])
             safe_c = int(user_input[CONF_SAFE_DEFAULT_CURRENT])
+            advanced = user_input[SECTION_ADVANCED]
+            window = int(advanced[CONF_ESTIMATE_WINDOW_SECONDS])
+            up_hold = int(advanced[CONF_UP_HOLD_SECONDS])
 
             if max_c < min_c:
                 errors[CONF_MAX_CURRENT] = "max_less_than_min"
             elif safe_c < 6 or safe_c > 16:
                 errors[CONF_SAFE_DEFAULT_CURRENT] = "safe_current_out_of_range"
+            elif not ESTIMATE_WINDOW_RANGE[0] <= window <= ESTIMATE_WINDOW_RANGE[1]:
+                errors[SECTION_ADVANCED] = "estimate_window_out_of_range"
+            elif not UP_HOLD_RANGE[0] <= up_hold <= UP_HOLD_RANGE[1]:
+                errors[SECTION_ADVANCED] = "up_hold_out_of_range"
             else:
                 # Slå ihop phases (från föregående steg) och parametrar
                 return self.async_create_entry(
@@ -543,6 +560,9 @@ class EVLoadBalancerOptionsFlow(OptionsFlow):
                         CONF_CAPACITY_WARNING_THRESHOLD: int(
                             user_input[CONF_CAPACITY_WARNING_THRESHOLD]
                         ),
+                        # Platta nycklar: koordinatorn läser options > data > standard.
+                        CONF_ESTIMATE_WINDOW_SECONDS: window,
+                        CONF_UP_HOLD_SECONDS: up_hold,
                     }
                 )
 
@@ -574,6 +594,14 @@ class EVLoadBalancerOptionsFlow(OptionsFlow):
         default_capacity_warning = existing_options.get(
             CONF_CAPACITY_WARNING_THRESHOLD,
             existing_data.get(CONF_CAPACITY_WARNING_THRESHOLD, DEFAULT_CAPACITY_WARNING_THRESHOLD),
+        )
+        default_window = existing_options.get(
+            CONF_ESTIMATE_WINDOW_SECONDS,
+            existing_data.get(CONF_ESTIMATE_WINDOW_SECONDS, DEFAULT_ESTIMATE_WINDOW_SECONDS),
+        )
+        default_up_hold = existing_options.get(
+            CONF_UP_HOLD_SECONDS,
+            existing_data.get(CONF_UP_HOLD_SECONDS, DEFAULT_UP_HOLD_SECONDS),
         )
 
         schema = vol.Schema(
@@ -657,6 +685,34 @@ class EVLoadBalancerOptionsFlow(OptionsFlow):
                         unit_of_measurement="A",
                         mode=NumberSelectorMode.BOX,
                     )
+                ),
+                # Intervallen kontrolleras ovan, inte i selektorn: ett intervallfel
+                # inuti en sektion når inte fältet utan blir ett råt base-fel med
+                # HTTP 400 (HA mappar inte nästlade schemafel), F-7.
+                vol.Required(SECTION_ADVANCED): section(
+                    vol.Schema(
+                        {
+                            vol.Required(
+                                CONF_ESTIMATE_WINDOW_SECONDS, default=default_window
+                            ): NumberSelector(
+                                NumberSelectorConfig(
+                                    step=1,
+                                    unit_of_measurement="s",
+                                    mode=NumberSelectorMode.BOX,
+                                )
+                            ),
+                            vol.Required(CONF_UP_HOLD_SECONDS, default=default_up_hold): (
+                                NumberSelector(
+                                    NumberSelectorConfig(
+                                        step=1,
+                                        unit_of_measurement="s",
+                                        mode=NumberSelectorMode.BOX,
+                                    )
+                                )
+                            ),
+                        }
+                    ),
+                    {"collapsed": True},
                 ),
             }
         )

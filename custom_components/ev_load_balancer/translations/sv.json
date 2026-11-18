@@ -103,6 +103,20 @@
           "action_on_sensor_loss": "Åtgärd vid sensorförlust",
           "safe_default_current": "Säker standardström vid sensorförlust (A)",
           "capacity_warning_threshold": "Kapacitetsvarnings-tröskel (A)"
+        },
+        "sections": {
+          "advanced": {
+            "name": "Avancerade inställningar",
+            "description": "Standardvärdena passar en elmätare som uppdaterar var 10:e sekund. Mätfönstret ska vara längre än mätarens uppdateringstid plus tiden det tar för värdet att nå Home Assistant. Ett för kort fönster ger tillbaka den pendlande laddströmmen.",
+            "data": {
+              "estimate_window_seconds": "Mätfönster (s)",
+              "up_hold_seconds": "Hålltid före höjning (s)"
+            },
+            "data_description": {
+              "estimate_window_seconds": "Hur långt bakåt laddarens ström jämförs med varje fasvärde. Standard 15 s, tillåtet 3–60 s.",
+              "up_hold_seconds": "Hur länge hushållets last ska ha legat lågt innan laddströmmen höjs. Standard 90 s, tillåtet 0–600 s."
+            }
+          }
         }
       }
     },
@@ -110,7 +124,9 @@
       "no_phases": "Minst en fassensor (L1) måste konfigureras.",
       "duplicate_phase_sensors": "Samma sensor kan inte användas för flera faser. Varje fas måste ha en unik strömsensor.",
       "max_less_than_min": "Högsta laddström måste vara minst lika stor som lägsta laddström.",
-      "safe_current_out_of_range": "Säker standardström måste vara mellan 6 och 16 A"
+      "safe_current_out_of_range": "Säker standardström måste vara mellan 6 och 16 A",
+      "estimate_window_out_of_range": "Mätfönstret måste vara mellan 3 och 60 sekunder.",
+      "up_hold_out_of_range": "Hålltiden måste vara mellan 0 och 600 sekunder."
     }
   },
   "selector": {

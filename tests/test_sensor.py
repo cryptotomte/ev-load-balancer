@@ -625,6 +625,28 @@ def test_coordinator_reads_options_over_data(hass):
     assert coordinator._max_current == 14
 
 
+def test_t17_entry_without_advanced_keys_uses_defaults(full_config_entry):
+    """T-17: an existing entry without the K-9 keys uses 15 s window and 90 s hold."""
+    coordinator = _make_coordinator(full_config_entry)
+
+    assert coordinator._estimator._window == timedelta(seconds=15)
+    assert coordinator._estimator._hold == timedelta(seconds=90)
+
+
+def test_advanced_settings_read_options_over_data():
+    """K-9: the two advanced settings are read options > data > default."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={"phases": [], "charger_entities": {}, "estimate_window_seconds": 30},
+        options={"estimate_window_seconds": 20, "up_hold_seconds": 120},
+    )
+
+    coordinator = _make_coordinator(entry)
+
+    assert coordinator._estimator._window == timedelta(seconds=20)
+    assert coordinator._estimator._hold == timedelta(seconds=120)
+
+
 # ---------------------------------------------------------------------------
 # Koordinator: lyssnare registrering/avregistrering
 # ---------------------------------------------------------------------------

@@ -48,6 +48,16 @@ VALID_PHASES = {
     "phase_2_sensor": SENSOR_L2,
     "phase_2_max_ampere": 25,
 }
+ADVANCED_DEFAULTS = {"estimate_window_seconds": 15, "up_hold_seconds": 90}
+VALID_PARAMS = {
+    "safety_margin": 2,
+    "min_current": 6,
+    "max_current": 16,
+    "phase_count": "auto",
+    "action_on_sensor_loss": "reduce",
+    "safe_default_current": 6,
+    "capacity_warning_threshold": 3,
+}
 MAX_LESS_THAN_MIN = {
     "safety_margin": 2,
     "min_current": 16,
@@ -128,7 +138,79 @@ async def test_options_flow_forms_serializable(
             "action_on_sensor_loss": "reduce",
             "safe_default_current": 6,
             "capacity_warning_threshold": 3,
+            "advanced": ADVANCED_DEFAULTS,
         },
         "params",
     )
     assert result["errors"] == {"max_current": "max_less_than_min"}
+
+
+async def _options_params_step(hass: HomeAssistant, client, entry) -> tuple[str, dict]:
+    """Open the options flow and post valid phases; return the params step URL and form."""
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    result = await _post(client, _OPTIONS_FLOW, {"handler": entry.entry_id}, "phases")
+    step = f"{_OPTIONS_FLOW}/{result['flow_id']}"
+    return step, await _post(client, step, VALID_PHASES, "params")
+
+
+async def test_t16_advanced_section_collapsed_and_saved_flat(
+    hass: HomeAssistant, client, mock_config_entry
+) -> None:
+    """T-16: the params form has a collapsed "advanced" section; values are stored flat."""
+    step, form = await _options_params_step(hass, client, mock_config_entry)
+
+    section = next(field for field in form["data_schema"] if field["name"] == "advanced")
+    assert section["type"] == "expandable"
+    assert section["expanded"] is False
+    defaults = {field["name"]: field["default"] for field in section["schema"]}
+    assert defaults == ADVANCED_DEFAULTS
+
+    resp = await client.post(
+        step,
+        json={**VALID_PARAMS, "advanced": {"estimate_window_seconds": 20, "up_hold_seconds": 120}},
+    )
+    assert resp.status == HTTPStatus.OK, await resp.text()
+    assert (await resp.json())["type"] == FlowResultType.CREATE_ENTRY
+    assert mock_config_entry.options["estimate_window_seconds"] == 20
+    assert mock_config_entry.options["up_hold_seconds"] == 120
+    assert "advanced" not in mock_config_entry.options
+
+
+@pytest.mark.parametrize(
+    ("advanced", "error"),
+    [
+        ({"estimate_window_seconds": 2, "up_hold_seconds": 90}, "estimate_window_out_of_range"),
+        ({"estimate_window_seconds": 61, "up_hold_seconds": 90}, "estimate_window_out_of_range"),
+        ({"estimate_window_seconds": 15, "up_hold_seconds": -1}, "up_hold_out_of_range"),
+        ({"estimate_window_seconds": 15, "up_hold_seconds": 601}, "up_hold_out_of_range"),
+    ],
+)
+async def test_t19_out_of_range_shows_form_again(
+    hass: HomeAssistant, client, mock_config_entry, advanced, error
+) -> None:
+    """T-19: a value outside the allowed range re-shows the form with an error; nothing is saved."""
+    step, _ = await _options_params_step(hass, client, mock_config_entry)
+
+    result = await _post(client, step, {**VALID_PARAMS, "advanced": advanced}, "params")
+
+    assert result["errors"] == {"advanced": error}
+    assert "estimate_window_seconds" not in mock_config_entry.options
+    assert "up_hold_seconds" not in mock_config_entry.options
+
+
+async def test_t19_range_limits_are_accepted(
+    hass: HomeAssistant, client, mock_config_entry
+) -> None:
+    """T-19: the range limits themselves (3 and 60 s, 0 and 600 s) are allowed."""
+    step, _ = await _options_params_step(hass, client, mock_config_entry)
+
+    resp = await client.post(
+        step,
+        json={**VALID_PARAMS, "advanced": {"estimate_window_seconds": 3, "up_hold_seconds": 600}},
+    )
+
+    assert (await resp.json())["type"] == FlowResultType.CREATE_ENTRY
+    assert mock_config_entry.options["estimate_window_seconds"] == 3
+    assert mock_config_entry.options["up_hold_seconds"] == 600
