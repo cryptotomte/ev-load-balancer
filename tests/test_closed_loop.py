@@ -208,7 +208,7 @@ class ClosedLoop:
         state_machine.on_car_connected()
         self.coordinator._last_sent_amp = self.charger.amp
         await self.coordinator.async_setup()
-        await self.hass.async_block_till_done()
+        await self.hass.async_block_till_done(wait_background_tasks=True)
         if not self.charger.three_phase:
             # The 1-phase mode was set long enough ago for the dwell time (K-5) to be over.
             self.coordinator._phase_switcher.record_mode_change(
@@ -227,7 +227,7 @@ class ClosedLoop:
             # Exact: the plain helper adds 0.5 s and would fire the 0.2 s coalescing
             # timer (K-6) one step early.
             async_fire_time_changed_exact(self.hass, dt_util.utcnow())
-            await self.hass.async_block_till_done()
+            await self.hass.async_block_till_done(wait_background_tasks=True)
             self._apply_commands()
         return self.trace
 
