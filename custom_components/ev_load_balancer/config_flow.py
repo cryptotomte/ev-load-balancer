@@ -7,6 +7,7 @@ för efterkonfiguration av fassensorer och beräkningsparametrar.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any
 
 import voluptuous as vol
@@ -59,6 +60,11 @@ _LOGGER = logging.getLogger(__name__)
 
 # Hopfälld sektion i options-steget params (spec 010 K-9)
 SECTION_ADVANCED = "advanced"
+
+
+def _whole_in_range(value: float, allowed: tuple[int, int]) -> bool:
+    """True för ett helt antal sekunder inom intervallet; 15.5 avrundas inte tyst."""
+    return math.isfinite(value) and value == int(value) and allowed[0] <= value <= allowed[1]
 
 
 class EVLoadBalancerConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -535,18 +541,24 @@ class EVLoadBalancerOptionsFlow(OptionsFlow):
             max_c = int(user_input[CONF_MAX_CURRENT])
             safe_c = int(user_input[CONF_SAFE_DEFAULT_CURRENT])
             advanced = user_input[SECTION_ADVANCED]
-            window = int(advanced[CONF_ESTIMATE_WINDOW_SECONDS])
-            up_hold = int(advanced[CONF_UP_HOLD_SECONDS])
+            window = advanced[CONF_ESTIMATE_WINDOW_SECONDS]
+            up_hold = advanced[CONF_UP_HOLD_SECONDS]
 
             if max_c < min_c:
                 errors[CONF_MAX_CURRENT] = "max_less_than_min"
             elif safe_c < 6 or safe_c > 16:
                 errors[CONF_SAFE_DEFAULT_CURRENT] = "safe_current_out_of_range"
-            elif not ESTIMATE_WINDOW_RANGE[0] <= window <= ESTIMATE_WINDOW_RANGE[1]:
+            # Båda fälten prövas, och ett fel i sektionen visas tillsammans med
+            # felen ovan; ett fel inuti sektionen kan bara visas på sektionen (A-6).
+            window_ok = _whole_in_range(window, ESTIMATE_WINDOW_RANGE)
+            up_hold_ok = _whole_in_range(up_hold, UP_HOLD_RANGE)
+            if not window_ok and not up_hold_ok:
+                errors[SECTION_ADVANCED] = "advanced_out_of_range"
+            elif not window_ok:
                 errors[SECTION_ADVANCED] = "estimate_window_out_of_range"
-            elif not UP_HOLD_RANGE[0] <= up_hold <= UP_HOLD_RANGE[1]:
+            elif not up_hold_ok:
                 errors[SECTION_ADVANCED] = "up_hold_out_of_range"
-            else:
+            if not errors:
                 # Slå ihop phases (från föregående steg) och parametrar
                 return self.async_create_entry(
                     data={
@@ -561,8 +573,8 @@ class EVLoadBalancerOptionsFlow(OptionsFlow):
                             user_input[CONF_CAPACITY_WARNING_THRESHOLD]
                         ),
                         # Platta nycklar: koordinatorn läser options > data > standard.
-                        CONF_ESTIMATE_WINDOW_SECONDS: window,
-                        CONF_UP_HOLD_SECONDS: up_hold,
+                        CONF_ESTIMATE_WINDOW_SECONDS: int(window),
+                        CONF_UP_HOLD_SECONDS: int(up_hold),
                     }
                 )
 

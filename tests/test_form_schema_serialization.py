@@ -230,3 +230,76 @@ async def test_t19_range_limits_are_accepted(
     assert (await resp.json())["type"] == FlowResultType.CREATE_ENTRY
     assert mock_config_entry.options["estimate_window_seconds"] == window
     assert mock_config_entry.options["up_hold_seconds"] == hold
+
+
+@pytest.mark.parametrize(
+    ("advanced", "error"),
+    [
+        ({"estimate_window_seconds": 15.5, "up_hold_seconds": 90}, "estimate_window_out_of_range"),
+        ({"estimate_window_seconds": 15, "up_hold_seconds": 90.5}, "up_hold_out_of_range"),
+        ({"estimate_window_seconds": 2, "up_hold_seconds": 601}, "advanced_out_of_range"),
+        ({"estimate_window_seconds": 15.5, "up_hold_seconds": -1}, "advanced_out_of_range"),
+    ],
+    ids=["window_not_whole", "hold_not_whole", "both_out_of_range", "both_wrong"],
+)
+async def test_advanced_non_integer_and_both_fields_give_form_error(
+    hass: HomeAssistant, client, mock_config_entry, advanced, error
+) -> None:
+    """13.3: a non-integer is a form error, not silently truncated; both fields are
+
+    checked and an error in both is shown at once. Nothing is saved.
+    """
+    step, _ = await _options_params_step(hass, client, mock_config_entry)
+
+    result = await _post(client, step, {**VALID_PARAMS, "advanced": advanced}, "params")
+
+    assert result["errors"] == {"advanced": error}
+    assert "estimate_window_seconds" not in mock_config_entry.options
+
+
+async def test_advanced_error_is_shown_with_other_field_errors(
+    hass: HomeAssistant, client, mock_config_entry
+) -> None:
+    """13.3: an error in the section does not hide an error in another field, or vice versa."""
+    step, _ = await _options_params_step(hass, client, mock_config_entry)
+
+    result = await _post(
+        client,
+        step,
+        {
+            **VALID_PARAMS,
+            "min_current": 16,
+            "max_current": 6,
+            "advanced": {"estimate_window_seconds": 31, "up_hold_seconds": 90},
+        },
+        "params",
+    )
+
+    assert result["errors"] == {
+        "max_current": "max_less_than_min",
+        "advanced": "estimate_window_out_of_range",
+    }
+
+
+@pytest.mark.parametrize("value", ["abc", None])
+async def test_advanced_non_number_is_rejected_without_server_error(
+    hass: HomeAssistant, client, mock_config_entry, value
+) -> None:
+    """13.3 / A-11: a non-number fails Home Assistant's own selector validation.
+
+    The view answers HTTP 400 with the error for the form (not 500), and nothing
+    is saved.
+    """
+    step, _ = await _options_params_step(hass, client, mock_config_entry)
+
+    resp = await client.post(
+        step,
+        json={
+            **VALID_PARAMS,
+            "advanced": {"estimate_window_seconds": value, "up_hold_seconds": 90},
+        },
+    )
+
+    assert resp.status == HTTPStatus.BAD_REQUEST, await resp.text()
+    assert "errors" in await resp.json()
+    assert "estimate_window_seconds" not in mock_config_entry.options

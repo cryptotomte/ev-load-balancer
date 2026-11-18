@@ -125,8 +125,9 @@
       "duplicate_phase_sensors": "Samma sensor kan inte användas för flera faser. Varje fas måste ha en unik strömsensor.",
       "max_less_than_min": "Högsta laddström måste vara minst lika stor som lägsta laddström.",
       "safe_current_out_of_range": "Säker standardström måste vara mellan 6 och 16 A",
-      "estimate_window_out_of_range": "Mätfönstret måste vara mellan 3 och 30 sekunder.",
-      "up_hold_out_of_range": "Hålltiden måste vara mellan 0 och 600 sekunder."
+      "estimate_window_out_of_range": "Mätfönstret måste vara ett helt antal sekunder mellan 3 och 30.",
+      "up_hold_out_of_range": "Hålltiden måste vara ett helt antal sekunder mellan 0 och 600.",
+      "advanced_out_of_range": "Mätfönstret måste vara ett helt antal sekunder mellan 3 och 30, och hålltiden ett helt antal sekunder mellan 0 och 600."
     }
   },
   "selector": {
