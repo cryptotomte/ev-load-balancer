@@ -216,6 +216,38 @@ async def test_r2_report_during_slow_command_is_not_dropped(hass, freezer):
         await rig.stop()
 
 
+async def test_shutdown_lets_calculation_in_flight_finish_without_rerun(hass, freezer):
+    """13.3: shutdown waits for the calculation in flight and starts no new one,
+
+    even when a report asked for one while it was running.
+    """
+    rig = Rig(hass, freezer)
+    coordinator = await rig.start(phases=[20.5] * 3, charger=[15.5] * 3, amp="16")
+    release = asyncio.Event()
+    sent: list[int] = []
+
+    async def slow_send_amp(amp: int) -> bool:
+        sent.append(amp)
+        await release.wait()
+        return True
+
+    coordinator._dispatcher.send_amp = slow_send_amp
+    rig.report([23.5] * 3)
+    await rig.advance(0.5, settle=False)
+    rig.report([26.5] * 3)
+    await rig.advance(0.5, settle=False)
+    assert sent == [15]
+
+    stopping = hass.async_create_task(rig.stop())
+    await asyncio.sleep(0)
+    assert not stopping.done()
+    release.set()
+    await stopping
+    await rig.advance(1)
+    assert sent == [15]
+    assert coordinator.last_sent_amp == 15
+
+
 # ---------------------------------------------------------------------------
 # D-12 / R-3: the 5 s clock
 # ---------------------------------------------------------------------------
@@ -271,6 +303,8 @@ async def test_clock_and_coalescing_end_on_unload(hass, freezer):
     rig = Rig(hass, freezer)
     coordinator = await rig.start(phases=[20.5] * 3, charger=[15.5] * 3, amp="16")
     rig.report([34.5] * 3)
+    await hass.async_block_till_done()
+    assert coordinator._calc_timer is not None
     await rig.stop()
 
     assert coordinator._calc_timer is None
