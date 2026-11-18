@@ -70,6 +70,7 @@ from .const import (
     DEFAULT_SENSOR_LOSS_ACTION,
     DEFAULT_UP_HOLD_SECONDS,
     DOMAIN,
+    ESTIMATE_WINDOW_RANGE,
     EVENT_CAPACITY_WARNING,
     EVENT_CURRENT_ADJUSTED,
     EVENT_DEVICE_PAUSED,
@@ -91,6 +92,7 @@ from .const import (
     SENSOR_STATUS,
     SENSOR_TARGET_CURRENT,
     SENSOR_UTILIZATION,
+    UP_HOLD_RANGE,
 )
 from .hysteresis import HysteresisAction, HysteresisCommand, HysteresisController
 from .load_estimator import LoadEstimator
@@ -183,15 +185,10 @@ class EVLoadBalancerCoordinator:
         )
 
         # Skattning av hushållslast (spec 010), options > data > standard
-        estimate_window = float(
-            opts.get(
-                CONF_ESTIMATE_WINDOW_SECONDS,
-                data.get(CONF_ESTIMATE_WINDOW_SECONDS, DEFAULT_ESTIMATE_WINDOW_SECONDS),
-            )
+        estimate_window = self._read_seconds(
+            CONF_ESTIMATE_WINDOW_SECONDS, DEFAULT_ESTIMATE_WINDOW_SECONDS, ESTIMATE_WINDOW_RANGE
         )
-        up_hold = float(
-            opts.get(CONF_UP_HOLD_SECONDS, data.get(CONF_UP_HOLD_SECONDS, DEFAULT_UP_HOLD_SECONDS))
-        )
+        up_hold = self._read_seconds(CONF_UP_HOLD_SECONDS, DEFAULT_UP_HOLD_SECONDS, UP_HOLD_RANGE)
         self._estimator = LoadEstimator(len(self._phases), estimate_window, up_hold)
         # Fassensorns last_reported vid senast behandlade rapport, per fas
         self._processed_reports: list[datetime | None] = [None] * len(self._phases)
@@ -250,6 +247,28 @@ class EVLoadBalancerCoordinator:
 
         # Cleanup-callbacks (registrerade lyssnare)
         self._remove_listeners: list[Callable] = []
+
+    def _read_seconds(self, key: str, default: int, allowed: tuple[int, int]) -> float:
+        """Läs en avancerad inställning (K-9), options > data > standard.
+
+        Ett handredigerat värde får inte stoppa integrationen (R-11): fel typ ger
+        standardvärdet och värden utanför intervallet begränsas, med en varning.
+        """
+        raw = self.entry.options.get(key, self.entry.data.get(key, default))
+        if isinstance(raw, bool) or not isinstance(raw, int | float) or not math.isfinite(raw):
+            _LOGGER.warning("Ogiltigt värde för %s: %r — använder standard %s s", key, raw, default)
+            return float(default)
+        value = min(max(float(raw), allowed[0]), allowed[1])
+        if value != raw:
+            _LOGGER.warning(
+                "%s=%r ligger utanför %s–%s s — använder %s s",
+                key,
+                raw,
+                allowed[0],
+                allowed[1],
+                value,
+            )
+        return value
 
     @property
     def state(self) -> BalancerState:

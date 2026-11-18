@@ -567,3 +567,46 @@ def test_no_active_configured_phase_is_not_unambiguous(hass):
     """D-16: active phases that map to no configured phase give no ceiling (no vacuous all())."""
     coordinator = EVLoadBalancerCoordinator(hass, _entry())
     assert coordinator._up_ceiling(dt_util.utcnow(), [5.0] * 3, [0.0] * 3, []) is None
+
+
+# ---------------------------------------------------------------------------
+# R-11: stored advanced settings are checked when read
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("options", "window", "hold"),
+    [
+        ({"estimate_window_seconds": "abc"}, 15, 90),
+        ({"estimate_window_seconds": None, "up_hold_seconds": True}, 15, 90),
+        ({"estimate_window_seconds": float("nan"), "up_hold_seconds": [90]}, 15, 90),
+        ({"estimate_window_seconds": 100, "up_hold_seconds": 1000}, 30, 600),
+        ({"estimate_window_seconds": 1, "up_hold_seconds": -5}, 3, 0),
+        ({"estimate_window_seconds": 20.5, "up_hold_seconds": 45}, 20.5, 45),
+    ],
+    ids=["text", "none_and_bool", "nan_and_list", "above", "below", "valid"],
+)
+async def test_r11_stored_settings_fall_back_or_are_clamped(
+    hass, freezer, caplog, options, window, hold
+):
+    """R-11 / 13.3: a hand-edited value never stops the integration.
+
+    A wrong type gives the default, a value outside the range is clamped; each
+    with one warning, and setup completes.
+    """
+    rig = Rig(hass, freezer, _entry(options))
+    coordinator = await rig.start(phases=[20.5] * 3, charger=[15.5] * 3, amp="16")
+    try:
+        assert coordinator._estimator._window == timedelta(seconds=window)
+        assert coordinator._estimator._hold == timedelta(seconds=hold)
+        warnings = [
+            r for r in caplog.records if r.levelname == "WARNING" and "_seconds" in r.getMessage()
+        ]
+        expected = sum(
+            1
+            for key, value in options.items()
+            if value != {"estimate_window_seconds": window, "up_hold_seconds": hold}[key]
+        )
+        assert len(warnings) == expected, [r.getMessage() for r in warnings]
+    finally:
+        await rig.stop()
