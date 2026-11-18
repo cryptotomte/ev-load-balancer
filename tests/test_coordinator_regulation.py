@@ -13,7 +13,8 @@ import re
 from datetime import timedelta
 
 import pytest
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
+from homeassistant.core import CoreState, HomeAssistant, ServiceCall
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
@@ -685,3 +686,19 @@ async def test_unavailable_sensor_warns_on_transition_only(hass, freezer, caplog
         assert warnings(PHASE_SENSORS[2]) == 1
     finally:
         await rig.stop()
+
+
+async def test_unload_before_home_assistant_started_sends_nothing(hass, freezer):
+    """13.3: shutdown also drops the start callback; a coordinator unloaded before
+
+    Home Assistant finished starting sends no psm when it does.
+    """
+    hass.set_state(CoreState.not_running)
+    rig = Rig(hass, freezer)
+    await rig.start(phases=[5.0] * 3, charger=[0.0] * 3, amp="6", car="Idle", balancing=False)
+    await rig.stop()
+
+    hass.set_state(CoreState.running)
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
+    await hass.async_block_till_done()
+    assert rig.commands == []

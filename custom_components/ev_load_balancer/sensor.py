@@ -517,7 +517,7 @@ class EVLoadBalancerCoordinator:
             self._phase_switcher.set_initial_mode(initial_phases)
             _LOGGER.debug("Initial fasläge satt baserat på: %s", initial_phases)
 
-        ha_start.async_at_started(self.hass, _init_after_ha_start)
+        self._remove_listeners.append(ha_start.async_at_started(self.hass, _init_after_ha_start))
 
         # Samla alla entitets-ID:n att bevaka
         entities_to_track: list[str] = []
