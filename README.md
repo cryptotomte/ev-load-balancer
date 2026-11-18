@@ -158,6 +158,11 @@ Verify the following before installation:
 > is what lets the balancer reduce the current, so a slow sensor delays every reduction.
 > Measured counter-example: Nibe's current sensors (BE1–BE3) are written every 61 seconds
 > and are not good enough.
+>
+> **Sensors that only report changes:** Some integrations write a sensor only when its
+> value changes. The balancer then raises the charge current after one of its own
+> adjustments only once every active phase has reported a new value, so a raise can be
+> delayed while a phase stays exactly steady. Reductions are never delayed by this.
 
 ---
 
