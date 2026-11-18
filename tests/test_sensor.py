@@ -530,6 +530,8 @@ async def test_paused_to_balancing_transition(hass, full_config_entry, freezer):
 
     # Andra beräkning (T=30s): resume-timer expired → BALANCING
     freezer.move_to(T0 + timedelta(seconds=30))
+    for sensor in ("sensor.current_l1", "sensor.current_l2", "sensor.current_l3"):
+        hass.states.async_set(sensor, "5.0")  # new report, unambiguous (K-4, D-14)
     await coordinator._async_calculate()
 
     assert coordinator.state == BalancerState.BALANCING
@@ -799,6 +801,8 @@ async def test_resume_command_sent_after_30s(hass, full_config_entry, freezer):
 
     # T=30s: timer expired → RESUME
     freezer.move_to(T0 + timedelta(seconds=30))
+    for sensor in ("sensor.current_l1", "sensor.current_l2", "sensor.current_l3"):
+        hass.states.async_set(sensor, "5.0")  # new report, unambiguous (K-4, D-14)
     await coordinator._async_calculate()
     coordinator._dispatcher.resume.assert_called_once()
     assert coordinator.state == BalancerState.BALANCING
@@ -1342,9 +1346,12 @@ async def test_resume_logging(hass, full_config_entry, caplog, freezer):
     hass.states.async_set("sensor.goe_409787_car_value", "Charging")
 
     T0 = dt_util.utcnow()
+    await coordinator._async_calculate()  # history from T0 (K-4)
 
     with caplog.at_level(logging.INFO, logger="custom_components.ev_load_balancer.sensor"):
         freezer.move_to(T0 + timedelta(seconds=30))
+        for sensor in ("sensor.current_l1", "sensor.current_l2", "sensor.current_l3"):
+            hass.states.async_set(sensor, "5.0")  # new report, unambiguous (K-4, D-14)
         # Initialisera resume-timern manuellt
         coordinator._hysteresis._above_resume_since = T0
         await coordinator._async_calculate()

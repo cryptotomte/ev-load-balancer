@@ -270,7 +270,12 @@ async def test_event_device_resumed_fires_on_resume(hass, full_config_entry, fre
     coordinator._pause_reason = "insufficient_capacity"
     assert coordinator.state == BalancerState.PAUSED
 
-    # Sensorvärden med gott om kapacitet för resume
+    # Sensorvärden med gott om kapacitet för resume; historik som täcker fönstret
+    # och ett nytt, entydigt mätvärde vid återstarten (K-4, D-14)
+    T0 = dt_util.utcnow()
+    _setup_sensor_states(hass, l1="5.0", l2="5.0", l3="5.0")
+    await coordinator._async_calculate()
+    freezer.move_to(T0 + timedelta(seconds=20))
     _setup_sensor_states(hass, l1="5.0", l2="5.0", l3="5.0")
 
     fired_events: list = []
@@ -280,11 +285,8 @@ async def test_event_device_resumed_fires_on_resume(hass, full_config_entry, fre
 
     hass.bus.async_listen_once(EVENT_DEVICE_RESUMED, capture_event)
 
-    T0 = dt_util.utcnow()
-
-    # Sätt above_resume_since 30s innan T0 så att timern är expired vid T0
-    freezer.move_to(T0)
-    coordinator._hysteresis._above_resume_since = T0 - timedelta(seconds=30)
+    # Sätt above_resume_since 30s tidigare så att timern är expired nu
+    coordinator._hysteresis._above_resume_since = dt_util.utcnow() - timedelta(seconds=30)
     await coordinator._async_calculate()
 
     await hass.async_block_till_done()

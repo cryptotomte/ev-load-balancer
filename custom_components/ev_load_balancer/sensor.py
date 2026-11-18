@@ -1010,7 +1010,39 @@ class EVLoadBalancerCoordinator:
                 min_current=self._min_current,
                 now=now,
             )
-            if phase_cmd is not None:
+            switch_allowed = phase_cmd is not None
+            if phase_cmd is not None and phase_cmd.target_mode == PhaseMode.THREE_PHASE:
+                # D-14 (R-5): efter uppväxlingen drar laddaren på alla faser, så
+                # strömmen räknas på dem i samma beräkning och en nödvändig sänkning
+                # går före psm. Går den inte att skicka görs ingen uppväxling.
+                result = calculate(
+                    phases=self._phases,
+                    phase_values=phase_values,
+                    household_loads=[estimate.household for estimate in estimates],
+                    device_values=device_values,
+                    active_phase_numbers=list(range(1, n_phases + 1)),
+                    safety_margin=self._safety_margin,
+                    min_current=self._min_current,
+                    max_current=self._max_current,
+                )
+                self.last_result = result
+                active_idx = list(range(n_phases))
+                if result.target_current < self._last_sent_amp:
+                    switch_allowed = await self._async_set_amp(
+                        now,
+                        HysteresisCommand(
+                            action=HysteresisAction.SET_AMP,
+                            amp=result.target_current,
+                            reason=(
+                                f"Före uppväxling 1→3: {self._last_sent_amp}A → "
+                                f"{result.target_current}A"
+                            ),
+                        ),
+                        result,
+                        device_values,
+                        active_idx,
+                    )
+            if switch_allowed:
                 psm_value = (
                     PSM_VALUE_1PHASE
                     if phase_cmd.target_mode == PhaseMode.ONE_PHASE
@@ -1162,15 +1194,15 @@ class EVLoadBalancerCoordinator:
         phase_values: list[float],
         device_values: list[float],
         active_idx: list[int],
-    ) -> int:
-        """Högsta ström en höjning får gå till (spec 010 K-4).
+    ) -> int | None:
+        """Högsta ström en höjning eller återstart får gå till (spec 010 K-4, D-14).
 
-        Kräver att senaste mätvärdet på varje aktiv fas var entydigt (F-3), och
-        att värdet ryms med den högsta skattningen under hålltiden.
+        None om senaste mätvärdet på någon aktiv fas inte var entydigt (F-3);
+        annars målet med den högsta skattningen under hålltiden.
         """
         estimates = self._estimator.estimates
         if not all(estimates[idx].tight for idx in active_idx):
-            return self._last_sent_amp
+            return None
         return self._hold_ceiling(now, phase_values, device_values, active_idx)
 
     def _hold_ceiling(
@@ -1180,8 +1212,11 @@ class EVLoadBalancerCoordinator:
         device_values: list[float],
         active_idx: list[int],
     ) -> int:
-        """Målet med den högsta skattningen per fas under hålltiden (K-4)."""
-        return calculate(
+        """Målet med den högsta skattningen per fas under hålltiden (K-4).
+
+        Inte uppklämt till min_current: under min ska ingen återstart ske (D-14).
+        """
+        peak = calculate(
             phases=self._phases,
             phase_values=phase_values,
             household_loads=self._estimator.peak(now),
@@ -1190,7 +1225,8 @@ class EVLoadBalancerCoordinator:
             safety_margin=self._safety_margin,
             min_current=self._min_current,
             max_current=self._max_current,
-        ).target_current
+        )
+        return min(self._max_current, math.floor(peak.available_min))
 
     def _record_command(
         self, now: datetime, amp: int, device_values: list[float], active_idx: list[int]

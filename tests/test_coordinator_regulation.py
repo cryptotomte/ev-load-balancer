@@ -8,6 +8,7 @@ mocked services. The clock is frozen and moved explicitly.
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 
 import pytest
 from homeassistant.core import HomeAssistant, ServiceCall
@@ -15,7 +16,6 @@ from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
     async_fire_time_changed_exact,
-    async_mock_service,
 )
 
 from custom_components.ev_load_balancer.const import DOMAIN
@@ -31,6 +31,7 @@ CHARGER_ENTITIES = {
     "nrg_5": "sensor.rig_charger_current_l2",
     "nrg_6": "sensor.rig_charger_current_l3",
     "map": "sensor.rig_charger_map",
+    "pha": "sensor.rig_charger_pha",
 }
 CHARGER_CURRENT_SENSORS = [CHARGER_ENTITIES[key] for key in ("nrg_4", "nrg_5", "nrg_6")]
 
@@ -64,31 +65,41 @@ class Rig:
         self.freezer = freezer
         self.entry = entry or _entry()
         self.coordinator: EVLoadBalancerCoordinator | None = None
-        self._number_calls: list[ServiceCall] = []
-        self._select_calls: list[ServiceCall] = []
+        self.calls: list[ServiceCall] = []
+
+    @property
+    def commands(self) -> list[tuple[str, str]]:
+        """Every command sent, in order: ("amp", "12"), ("psm", "2"), ("frc", "1")."""
+        result = []
+        for call in self.calls:
+            if call.domain == "number":
+                result.append(("amp", str(int(call.data["value"]))))
+            else:
+                key = "psm" if call.data["entity_id"] == CHARGER_ENTITIES["psm"] else "frc"
+                result.append((key, call.data["option"]))
+        return result
 
     @property
     def amps(self) -> list[int]:
         """Every amp value sent, in order."""
-        return [int(call.data["value"]) for call in self._number_calls]
+        return [int(value) for key, value in self.commands if key == "amp"]
 
     @property
     def psm(self) -> list[str]:
         """Every psm option sent, in order."""
-        return [
-            call.data["option"]
-            for call in self._select_calls
-            if call.data["entity_id"] == CHARGER_ENTITIES["psm"]
-        ]
+        return [value for key, value in self.commands if key == "psm"]
 
     @property
     def frc(self) -> list[str]:
         """Every frc option sent, in order."""
-        return [
-            call.data["option"]
-            for call in self._select_calls
-            if call.data["entity_id"] == CHARGER_ENTITIES["frc"]
-        ]
+        return [value for key, value in self.commands if key == "frc"]
+
+    def _mock_services(self) -> None:
+        async def record(call: ServiceCall) -> None:
+            self.calls.append(call)
+
+        self.hass.services.async_register("number", "set_value", record)
+        self.hass.services.async_register("select", "select_option", record)
 
     def report(self, values: list[float]) -> None:
         """The meter writes one value per phase (a new sample even if unchanged)."""
@@ -111,15 +122,17 @@ class Rig:
         amp: str | None,
         car: str = "Charging",
         psm: str | None = None,
+        pha: str | None = None,
         balancing: bool = True,
     ) -> EVLoadBalancerCoordinator:
         """Set the inputs, set up the coordinator and, if balancing, give it its first sample.
 
         ``amp`` is the state of the charger's amp entity (None: entity missing).
         """
-        self._number_calls = async_mock_service(self.hass, "number", "set_value")
-        self._select_calls = async_mock_service(self.hass, "select", "select_option")
+        self._mock_services()
         self.hass.states.async_set(CHARGER_ENTITIES["map"], "[1, 2, 3]")
+        if pha is not None:
+            self.hass.states.async_set(CHARGER_ENTITIES["pha"], pha)
         if amp is not None:
             self.hass.states.async_set(CHARGER_ENTITIES["amp"], amp)
         if psm is not None:
@@ -394,5 +407,67 @@ async def test_setup_without_car_sends_psm_auto(hass, freezer):
     await rig.start(phases=[5.0] * 3, charger=[0.0] * 3, amp="6", car="Idle", balancing=False)
     try:
         assert rig.psm == ["0"]
+    finally:
+        await rig.stop()
+
+
+# ---------------------------------------------------------------------------
+# D-14 / R-5, R-6: up-switch and resume
+# ---------------------------------------------------------------------------
+
+PHA_L1_ONLY = "[true, false, false, true, true, true]"
+
+
+async def test_r5_upswitch_reduces_to_l2_l3_budget_before_psm(hass, freezer):
+    """R-5 / D-14: 1-phase at 16 A on L1, L2 budget 12 A: the up-switch first reduces
+
+    to 12 A, computed over all configured phases, and only then sends psm.
+    """
+    rig = Rig(hass, freezer)
+    # Household 5 / 11 / 5 A → budgets 18 / 12 / 18 A; charger on L1 only (pha)
+    coordinator = await rig.start(
+        phases=[20.5, 11.0, 5.0], charger=[15.5, 0.0, 0.0], amp="16", psm="1", pha=PHA_L1_ONLY
+    )
+    # The 1-phase mode is older than the dwell time (K-5).
+    coordinator._phase_switcher.record_mode_change(
+        coordinator.phase_switcher_mode, dt_util.utcnow() - timedelta(seconds=300)
+    )
+    try:
+        await _report_every_5s(rig, [20.5, 11.0, 5.0], 70)
+        assert rig.commands[:2] == [("amp", "12"), ("psm", "2")], rig.commands
+    finally:
+        await rig.stop()
+
+
+async def test_r6_resume_is_capped_by_hold_time_ceiling(hass, freezer):
+    """R-6 / D-14: resume after a pause goes no higher than the hold-time ceiling.
+
+    Shortage (h = 19 A) → reduction to 6 A and pause. Then h = 12 A for 15 s and
+    h = 7 A after that. The target is 16 A, but with h = 12 A inside the 90 s hold
+    time the ceiling is 25 - 12 - 2 = 11 A, so the resume is to 11 A.
+    """
+    rig = Rig(hass, freezer)
+    await rig.start(phases=[20.5] * 3, charger=[15.5] * 3, amp="16")
+    try:
+        rig.report([34.5] * 3)
+        await rig.advance(0.5)
+        assert rig.amps == [6]
+        rig.charger([5.5] * 3)
+        for _ in range(6):
+            rig.report([24.5] * 3)
+            await rig.advance(5)
+            if rig.frc:
+                break
+        assert rig.frc == ["1"]
+
+        rig.charger([0.0] * 3)
+        await _report_every_5s(rig, [12.0] * 3, 15)
+        for _ in range(60):
+            rig.report([7.0] * 3)
+            await rig.advance(5)
+            if len(rig.frc) > 1:
+                break
+        assert rig.frc == ["1", "0"]
+        assert rig.amps == [6, 11]
     finally:
         await rig.stop()
