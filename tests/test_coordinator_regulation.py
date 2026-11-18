@@ -8,6 +8,8 @@ mocked services. The clock is frozen and moved explicitly.
 from __future__ import annotations
 
 import asyncio
+import logging
+import re
 from datetime import timedelta
 
 import pytest
@@ -613,8 +615,43 @@ async def test_r11_stored_settings_fall_back_or_are_clamped(
 
 
 # ---------------------------------------------------------------------------
-# Warnings on transition (13.3)
+# K-7 log line and warnings on transition (13.3)
 # ---------------------------------------------------------------------------
+
+K7_FIELDS = re.compile(
+    r"^Skattning (L[123]): nytt=(ja|nej) P=[\d.-]+A laddare_min=[\d.-]+A laddare_max=[\d.-]+A "
+    r"låg=[\d.-]+A hög=[\d.-]+A h=[\d.-]+A entydig=(True|False) budget=[\d.-]+A$"
+)
+
+
+def _k7_lines(caplog) -> list[tuple[str, str]]:
+    lines = []
+    for record in caplog.records:
+        match = K7_FIELDS.match(record.getMessage())
+        if match:
+            lines.append((match.group(1), match.group(2)))
+    return lines
+
+
+async def test_k7_log_line_shows_which_phases_got_a_new_sample(hass, freezer, caplog):
+    """K-7 / 13.3: one DEBUG line per phase with P, charger min/max, low, high, h, budget,
+
+    and whether the phase got a new sample in this calculation.
+    """
+    caplog.set_level(logging.DEBUG, logger="custom_components.ev_load_balancer.sensor")
+    rig = Rig(hass, freezer)
+    await rig.start(phases=[20.5] * 3, charger=[15.5] * 3, amp="16")
+    try:
+        caplog.clear()
+        hass.states.async_set(PHASE_SENSORS[1], "21.50")
+        await rig.advance(0.5)
+        assert _k7_lines(caplog) == [("L1", "nej"), ("L2", "ja"), ("L3", "nej")]
+
+        caplog.clear()
+        await rig.advance(5)
+        assert _k7_lines(caplog) == [("L1", "nej"), ("L2", "nej"), ("L3", "nej")]
+    finally:
+        await rig.stop()
 
 
 async def test_unavailable_sensor_warns_on_transition_only(hass, freezer, caplog):

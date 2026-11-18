@@ -991,10 +991,12 @@ class EVLoadBalancerCoordinator:
 
         device_values, substitute = self._read_device_sync()
         self._estimator.record_device(now, device_values, substitute)
+        new_samples: set[int] = set()
         for idx, reported in enumerate(phase_reported):
             if reported != self._processed_reports[idx]:
                 self._processed_reports[idx] = reported
                 self._estimator.on_phase_report(reported, idx, phase_values[idx])
+                new_samples.add(idx)
         estimates = self._estimator.estimates
 
         # Parsa map för aktiva faser
@@ -1204,7 +1206,7 @@ class EVLoadBalancerCoordinator:
                     cmd.reason,
                 )
 
-        self._log_estimates(result)
+        self._log_estimates(result, new_samples)
 
         # VIKTIGT: kapacitetsvarning kontrolleras FÖRE _notify_all_listeners() för att
         # säkerställa att event skickas på HA:s eventbuss innan binary_sensor:s
@@ -1296,14 +1298,19 @@ class EVLoadBalancerCoordinator:
             [float(amp) if idx in active_idx else value for idx, value in enumerate(device_values)],
         )
 
-    def _log_estimates(self, result: CalculationResult) -> None:
-        """Logga skattningen per fas på DEBUG (spec 010 K-7)."""
+    def _log_estimates(self, result: CalculationResult, new_samples: set[int]) -> None:
+        """Logga skattningen per fas på DEBUG (spec 010 K-7).
+
+        nytt=ja: fasen fick ett nytt mätvärde i den här beräkningen; nej: värdet
+        är från en tidigare rapport (klockan, bilstatus, fasläge).
+        """
         budgets = [result.charger_budget_l1, result.charger_budget_l2, result.charger_budget_l3]
         for idx, estimate in enumerate(self._estimator.estimates):
             _LOGGER.debug(
-                "Skattning %s: P=%.2fA laddare_min=%.2fA laddare_max=%.2fA "
+                "Skattning %s: nytt=%s P=%.2fA laddare_min=%.2fA laddare_max=%.2fA "
                 "låg=%.2fA hög=%.2fA h=%.2fA entydig=%s budget=%.2fA",
                 self._phases[idx].get("label", f"L{idx + 1}"),
+                "ja" if idx in new_samples else "nej",
                 estimate.reported,
                 estimate.device_min,
                 estimate.device_max,
