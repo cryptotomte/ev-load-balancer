@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
@@ -69,6 +69,7 @@ class Rig:
         self.entry = entry or _entry()
         self.coordinator: EVLoadBalancerCoordinator | None = None
         self.calls: list[ServiceCall] = []
+        self.call_times: list[datetime] = []
 
     @property
     def commands(self) -> list[tuple[str, str]]:
@@ -100,6 +101,7 @@ class Rig:
     def _mock_services(self) -> None:
         async def record(call: ServiceCall) -> None:
             self.calls.append(call)
+            self.call_times.append(dt_util.utcnow())
 
         self.hass.services.async_register("number", "set_value", record)
         self.hass.services.async_register("select", "select_option", record)
@@ -736,3 +738,100 @@ async def test_unload_before_home_assistant_started_sends_nothing(hass, freezer)
     hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
     await hass.async_block_till_done()
     assert rig.commands == []
+
+
+# ---------------------------------------------------------------------------
+# T-10, T-12, T-13 through the listeners, with the clock moving
+# ---------------------------------------------------------------------------
+
+
+async def test_t10_charger_changes_without_phase_report_send_nothing(hass, freezer):
+    """T-10 / F-2: the charger drops from 15.5 A to 5.5 A while the meter writes nothing
+
+    new (P-3 false). For 40 s the clock recalculates; the old phase value is never
+    compared with the newer charger values, so nothing is sent. The old formula
+    would give h = 20.5 - 5.5 = 15 A and reduce to 8 A.
+    """
+    rig = Rig(hass, freezer)
+    await rig.start(phases=[20.5] * 3, charger=[15.5] * 3, amp="16")
+    try:
+        for value in (12.0, 9.0, 6.0, 5.5):
+            rig.charger([value] * 3)
+            await rig.advance(1)
+        await rig.advance(40)
+        assert rig.commands == []
+    finally:
+        await rig.stop()
+
+
+async def test_t12_increase_waits_until_history_covers_window(hass, freezer):
+    """T-12: right after start an increase waits until the history covers the 15 s window.
+
+    No command is sent before (belief 10 A read from the charger), so only the
+    history can block; the reports are unambiguous from 15 s after setup.
+    """
+    rig = Rig(hass, freezer, _entry({"up_hold_seconds": 0}))
+    setup_at = dt_util.utcnow()
+    await rig.start(phases=[20.5] * 3, charger=[15.5] * 3, amp="10")
+    try:
+        for _ in range(30):
+            rig.report([20.5] * 3)
+            await rig.advance(1)
+        assert rig.amps == [16]
+        raised_at = (rig.call_times[0] - setup_at).total_seconds()
+        # history starts with the first calculation, 0.2 s after setup; reports every 1 s
+        assert 15.2 <= raised_at <= 15.2 + 1 + 0.2, raised_at
+    finally:
+        await rig.stop()
+
+
+async def test_t13_sensor_loss_through_listener_failsafe_and_recovery(hass, freezer):
+    """T-13: one phase sensor unavailable → failsafe reduce to 6 A through the listener;
+
+    no calculation while in FAILSAFE (reports and clock ticks go on); recovery when
+    the sensor returns, then calculations again.
+    """
+    rig = Rig(hass, freezer)
+    coordinator = await rig.start(phases=[20.5] * 3, charger=[15.5] * 3, amp="16")
+    calculate = coordinator._async_calculate
+    calls: list[str] = []
+
+    async def counting_calculate() -> None:
+        calls.append(coordinator.state.value)
+        await calculate()
+
+    coordinator._async_calculate = counting_calculate
+    try:
+        hass.states.async_set(PHASE_SENSORS[1], "unavailable")
+        await rig.advance(0.5)
+        assert coordinator.state.value == "failsafe"
+        assert rig.amps == [6]
+
+        calls.clear()
+        for _ in range(4):
+            hass.states.async_set(PHASE_SENSORS[0], "20.50")
+            hass.states.async_set(PHASE_SENSORS[2], "21.00")
+            await rig.advance(5)
+        assert calls == []
+
+        rig.report([20.5] * 3)
+        await rig.advance(0.5)
+        assert coordinator.state.value == "balancing"
+        assert calls == ["balancing"]
+    finally:
+        await rig.stop()
+
+
+async def test_t13_total_sensor_loss_pauses_through_listener(hass, freezer):
+    """T-13: all phase sensors unavailable → pause (frc = 1), as before."""
+    rig = Rig(hass, freezer)
+    coordinator = await rig.start(phases=[20.5] * 3, charger=[15.5] * 3, amp="16")
+    try:
+        for sensor in PHASE_SENSORS:
+            hass.states.async_set(sensor, "unavailable")
+        await rig.advance(0.5)
+        assert coordinator.state.value == "failsafe"
+        assert rig.frc == ["1"]
+        assert rig.amps == []
+    finally:
+        await rig.stop()
