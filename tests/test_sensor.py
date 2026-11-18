@@ -806,11 +806,10 @@ async def test_resume_command_sent_after_30s(hass, full_config_entry, freezer):
 
 
 @pytest.mark.asyncio
-async def test_no_commands_sent_when_car_disconnects_while_paused(hass, full_config_entry):
-    """Inga kommandon ska skickas när bilen kopplas från under PAUSED-tillstånd.
+async def test_only_park_at_min_when_car_disconnects_while_paused(hass, full_config_entry):
+    """Car disconnected while PAUSED: only amp = min is sent (spec 010 D-10 a).
 
-    Scenario: State = PAUSED → bilsensor ändras till 'Idle' →
-    ingen send_amp/send_frc ska anropas.
+    No pause or resume command follows the disconnect.
     """
     coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
 
@@ -840,9 +839,9 @@ async def test_no_commands_sent_when_car_disconnects_while_paused(hass, full_con
 
     await coordinator._async_calculate()
 
-    # IDLE — inga kommandon ska skickas
     assert coordinator.state == BalancerState.IDLE
-    coordinator._dispatcher.send_amp.assert_not_called()
+    coordinator._dispatcher.send_amp.assert_called_once_with(6)
+    assert coordinator.last_sent_amp == 6
     coordinator._dispatcher.pause.assert_not_called()
     coordinator._dispatcher.resume.assert_not_called()
 

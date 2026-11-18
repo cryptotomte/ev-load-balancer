@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
@@ -91,7 +92,7 @@ from .const import (
     SENSOR_TARGET_CURRENT,
     SENSOR_UTILIZATION,
 )
-from .hysteresis import HysteresisAction, HysteresisController
+from .hysteresis import HysteresisAction, HysteresisCommand, HysteresisController
 from .load_estimator import LoadEstimator
 from .phase_switcher import PhaseMode, PhaseSwitcher
 from .state_machine import BalancerState, LoadBalancerStateMachine
@@ -464,6 +465,7 @@ class EVLoadBalancerCoordinator:
         - Faskarta (map)
         - Laddarens ström per fas (nrg_4, nrg_5, nrg_6)
         """
+        self._last_sent_amp = self._read_charger_amp()
 
         # Skjut upp PSM auto + initial fasläge till efter att HA är fullt uppstartat.
         # select.select_option-tjänsten är ej tillgänglig under setup (timing-issue).
@@ -628,6 +630,11 @@ class EVLoadBalancerCoordinator:
         if self._state_machine.state == BalancerState.FAILSAFE:
             return
 
+        if entity_id == self._charger_entities.get("car_value"):
+            # D-10: inkopplad bil får sitt värde direkt, utan sammanslagning.
+            self._start_calculation()
+            return
+
         self._schedule_calculation()
 
     @callback
@@ -692,9 +699,10 @@ class EVLoadBalancerCoordinator:
 
             if self._action_on_sensor_loss == "pause":
                 await self._dispatcher.pause()
-            else:
-                # Default: reduce till safe_default_current
-                await self._dispatcher.send_amp(self._safe_default_current)
+            elif await self._dispatcher.send_amp(self._safe_default_current):
+                # R-7: annars blir nästa "sänkning" en okontrollerad höjning
+                self._last_sent_amp = self._safe_default_current
+                self._hysteresis.record_amp_change(utcnow())
 
         self._notify_all_listeners()
 
@@ -724,10 +732,31 @@ class EVLoadBalancerCoordinator:
         )
         self._state_machine.recover_from_failsafe()
         self._pause_reason = None
+        self._last_sent_amp = self._read_charger_amp()
         self._notify_all_listeners()
 
         # Starta beräkningscykel för att återta normal drift
         self._schedule_calculation()
+
+    def _read_charger_amp(self) -> int:
+        """Laddarens inställda ström enligt amp-entiteten (D-10).
+
+        Går den inte att läsa antas max_current: ett för högt antagande ger en
+        sänkning i onödan, ett för lågt döljer en överlast.
+        """
+        entity_id = self._charger_entities.get("amp", "")
+        state = self.hass.states.get(entity_id) if entity_id else None
+        if state is not None:
+            try:
+                return math.ceil(float(state.state))
+            except (ValueError, TypeError, OverflowError):
+                pass
+        _LOGGER.info(
+            "Laddarens ström kan inte läsas från '%s' — antar %sA",
+            entity_id,
+            self._max_current,
+        )
+        return self._max_current
 
     def _read_device_values_sync(self) -> list[float]:
         """Läs laddarens ström per fas synkront.
@@ -841,6 +870,7 @@ class EVLoadBalancerCoordinator:
             return
 
         now = utcnow()
+        state_before = self._state_machine.state
 
         # Läs fassensorvärden — kontrollera unavailable
         phase_values: list[float] = []
@@ -925,8 +955,13 @@ class EVLoadBalancerCoordinator:
                 self._state_machine.state,
             )
 
+        n_phases = len(self._phases)
+        active_idx = [p - 1 for p in result.active_phases if 0 < p <= n_phases]
+
         # Hantera bilstatus → IDLE/BALANCING-övergångar
-        self._handle_car_status()
+        plugged_in = await self._async_handle_car_status(
+            state_before, now, device_values, active_idx
+        )
 
         # Detektera PHEV: uppdatera phase_switcher om laddaren enbart kör 1-fas
         if self._supports_phase_switching:
@@ -969,45 +1004,32 @@ class EVLoadBalancerCoordinator:
         current_sm_state = self._state_machine.state
         if current_sm_state in (BalancerState.BALANCING, BalancerState.PAUSED):
             is_paused = current_sm_state == BalancerState.PAUSED
-            n_phases = len(self._phases)
-            active_idx = [p - 1 for p in result.active_phases if 0 < p <= n_phases]
 
-            cmd = self._hysteresis.evaluate(
-                available_min=result.available_min,
-                target_current=result.target_current,
-                last_sent_amp=self._last_sent_amp,
-                is_paused=is_paused,
-                now=now,
-                up_ceiling=self._up_ceiling(now, phase_values, device_values, active_idx),
-            )
+            if plugged_in:
+                # D-10: laddaren har dragit 0 A, så skattningen är exakt; värdet
+                # skickas utan cooldown och utan krav på entydigt mätvärde. Taket
+                # från hålltiden gäller (spec 010 A-9).
+                amp = min(
+                    result.target_current,
+                    self._hold_ceiling(now, phase_values, device_values, active_idx),
+                )
+                cmd = HysteresisCommand(
+                    action=HysteresisAction.SET_AMP,
+                    amp=max(amp, self._min_current),
+                    reason=f"Bil inkopplad: start på {max(amp, self._min_current)}A",
+                )
+            else:
+                cmd = self._hysteresis.evaluate(
+                    available_min=result.available_min,
+                    target_current=result.target_current,
+                    last_sent_amp=self._last_sent_amp,
+                    is_paused=is_paused,
+                    now=now,
+                    up_ceiling=self._up_ceiling(now, phase_values, device_values, active_idx),
+                )
 
             if cmd.action == HysteresisAction.SET_AMP:
-                # Reglera laddström (upp eller ned)
-                old_amp = self._last_sent_amp
-                direction = "sänkt" if cmd.amp < old_amp else "höjd"
-                sent = await self._dispatcher.send_amp(cmd.amp)
-                if sent:
-                    self._last_sent_amp = cmd.amp
-                    self._hysteresis.record_amp_change(now)
-                    self._record_command(now, cmd.amp, device_values, active_idx)
-                    _LOGGER.info(
-                        "Ström %s: %sA → %sA (%s)",
-                        direction,
-                        old_amp,
-                        cmd.amp,
-                        cmd.reason,
-                    )
-                    # Skicka event om strömsändning lyckades
-                    self._fire_event(
-                        EVENT_CURRENT_ADJUSTED,
-                        {
-                            "old_current": old_amp,
-                            "new_current": cmd.amp,
-                            "reason": cmd.reason,
-                            "phase_loads": result.phase_loads,
-                            "available": result.available_min,
-                        },
-                    )
+                await self._async_set_amp(now, cmd, result, device_values, active_idx)
 
             elif cmd.action == HysteresisAction.PAUSE:
                 # Pausa laddning — övergå till PAUSED
@@ -1074,6 +1096,35 @@ class EVLoadBalancerCoordinator:
         # Notifiera alla sensorlyssnare om uppdatering
         self._notify_all_listeners()
 
+    async def _async_set_amp(
+        self,
+        now: datetime,
+        cmd: HysteresisCommand,
+        result: CalculationResult,
+        device_values: list[float],
+        active_idx: list[int],
+    ) -> bool:
+        """Skicka cmd.amp; vid lyckad sändning uppdateras senast skickat, fönstret och eventet."""
+        old_amp = self._last_sent_amp
+        direction = "sänkt" if cmd.amp < old_amp else "höjd"
+        if not await self._dispatcher.send_amp(cmd.amp):
+            return False
+        self._last_sent_amp = cmd.amp
+        self._hysteresis.record_amp_change(now)
+        self._record_command(now, cmd.amp, device_values, active_idx)
+        _LOGGER.info("Ström %s: %sA → %sA (%s)", direction, old_amp, cmd.amp, cmd.reason)
+        self._fire_event(
+            EVENT_CURRENT_ADJUSTED,
+            {
+                "old_current": old_amp,
+                "new_current": cmd.amp,
+                "reason": cmd.reason,
+                "phase_loads": result.phase_loads,
+                "available": result.available_min,
+            },
+        )
+        return True
+
     def _up_ceiling(
         self,
         now: datetime,
@@ -1089,6 +1140,16 @@ class EVLoadBalancerCoordinator:
         estimates = self._estimator.estimates
         if not all(estimates[idx].tight for idx in active_idx):
             return self._last_sent_amp
+        return self._hold_ceiling(now, phase_values, device_values, active_idx)
+
+    def _hold_ceiling(
+        self,
+        now: datetime,
+        phase_values: list[float],
+        device_values: list[float],
+        active_idx: list[int],
+    ) -> int:
+        """Målet med den högsta skattningen per fas under hålltiden (K-4)."""
         return calculate(
             phases=self._phases,
             phase_values=phase_values,
@@ -1160,15 +1221,25 @@ class EVLoadBalancerCoordinator:
             # Map visar 3-fas → laddaren klarar 3-fas
             self._phase_switcher.set_device_capability(supports_3phase=True)
 
-    def _handle_car_status(self) -> None:
+    async def _async_handle_car_status(
+        self,
+        state_before: BalancerState,
+        now: datetime,
+        device_values: list[float],
+        active_idx: list[int],
+    ) -> bool:
         """Hanterar bilstatus för IDLE/BALANCING-övergångar.
 
         Läser car_value-sensorn och triggar övergångar i state machine.
         Not: FAILSAFE-tillstånd hanteras inte här (det är en fassensor-händelse).
+
+        Returns:
+            True när bilen kopplades in: IDLE → BALANCING från ett IDLE som
+            gällde redan före beräkningen (inte vid start med laddande bil).
         """
         car_entity = self._charger_entities.get("car_value", "")
         if not car_entity:
-            return
+            return False
 
         state = self.hass.states.get(car_entity)
         if state is None or state.state in ("unavailable", "unknown"):
@@ -1177,7 +1248,7 @@ class EVLoadBalancerCoordinator:
                 car_entity,
                 state.state if state else "saknas",
             )
-            return
+            return False
 
         car_state = state.state
         sm_state = self._state_machine.state
@@ -1186,6 +1257,7 @@ class EVLoadBalancerCoordinator:
             # Bil ansluten — övergå till BALANCING
             if self._state_machine.on_car_connected():
                 _LOGGER.info("Tillståndsändring: IDLE → BALANCING (car_value='%s')", car_state)
+                return state_before == BalancerState.IDLE
         elif (
             sm_state in (BalancerState.BALANCING, BalancerState.PAUSED)
             and car_state == _CAR_IDLE_STATE
@@ -1194,10 +1266,15 @@ class EVLoadBalancerCoordinator:
             prev = sm_state
             if self._state_machine.on_car_disconnected():
                 self._pause_reason = None
-                # Nollställ hysteres-state och last_sent_amp (T008)
                 self._hysteresis.reset()
-                self._last_sent_amp = self._min_current
                 _LOGGER.info("Tillståndsändring: %s → IDLE (car_value='Idle')", prev)
+                # D-10: laddaren ska stå där koden tror inför nästa inkoppling.
+                if await self._dispatcher.send_amp(self._min_current):
+                    self._last_sent_amp = self._min_current
+                    self._record_command(now, self._min_current, device_values, active_idx)
+                else:
+                    self._last_sent_amp = self._read_charger_amp()
+        return False
 
 
 # ---------------------------------------------------------------------------

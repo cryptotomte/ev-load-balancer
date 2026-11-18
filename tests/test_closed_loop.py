@@ -179,6 +179,7 @@ class ClosedLoop:
         for call in self._number_calls[self._seen_number :]:
             amp = int(call.data["value"])
             self.charger.set_amp(amp)
+            self.hass.states.async_set(CHARGER_ENTITIES["amp"], str(amp))
             self.trace.amps.append((round(self.now, 1), amp))
         self._seen_number = len(self._number_calls)
         for call in self._select_calls[self._seen_select :]:
@@ -195,6 +196,7 @@ class ClosedLoop:
         self._number_calls = async_mock_service(self.hass, "number", "set_value")
         self._select_calls = async_mock_service(self.hass, "select", "select_option")
         self.hass.states.async_set(CHARGER_ENTITIES["map"], "[1, 2, 3]")
+        self.hass.states.async_set(CHARGER_ENTITIES["amp"], str(self.charger.amp))
         # The meter has a value from before the run started.
         for sensor, value in zip(PHASE_SENSORS, self._total()):
             self.hass.states.async_set(sensor, f"{value:.2f}")
@@ -206,7 +208,6 @@ class ClosedLoop:
         state_machine.record_successful_calculation()
         state_machine.record_successful_calculation()
         state_machine.on_car_connected()
-        self.coordinator._last_sent_amp = self.charger.amp
         await self.coordinator.async_setup()
         await self.hass.async_block_till_done(wait_background_tasks=True)
         if not self.charger.three_phase:
