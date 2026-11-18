@@ -99,7 +99,7 @@ and dashboard cards:
 Verify the following before installation:
 
 **Home Assistant:**
-- [ ] Home Assistant 2024.1.0 or later
+- [ ] Home Assistant 2024.7.0 or later
 - [ ] HACS installed ([instructions](https://hacs.xyz/docs/setup/download))
 
 **Hardware:**
