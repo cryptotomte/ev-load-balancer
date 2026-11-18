@@ -267,7 +267,7 @@ async def test_clock_pauses_15s_after_shortage_without_sensor_events(hass, freez
         rig.report([34.5] * 3)
         shortage = dt_util.utcnow()
         await rig.advance(0.5)
-        assert rig.amps == [6]
+        assert rig.amps == [16, 6]
 
         pause_after = None
         for _ in range(300):
@@ -284,18 +284,20 @@ async def test_clock_pauses_15s_after_shortage_without_sensor_events(hass, freez
 async def test_clock_is_not_a_sample(hass, freezer):
     """D-12: clock recalculations alone never make an estimate unambiguous.
 
-    The only report came before the history covered the window, so an increase
-    must wait for the next report, however many clock ticks pass.
+    The last report came while the history did not cover the window and the
+    first command (D-19) was in it, so an increase must wait for the next
+    report, however many clock ticks pass.
     """
     rig = Rig(hass, freezer)
-    await rig.start(phases=[20.5] * 3, charger=[15.5] * 3, amp="10")
+    # h = 14.5 - 9.5 = 5 A → target 16 A; the first command is the measured 10 A
+    await rig.start(phases=[14.5] * 3, charger=[9.5] * 3, amp="10")
     try:
         await rig.advance(60)
-        assert rig.amps == []
+        assert rig.amps == [10]
 
-        rig.report([20.5] * 3)
+        rig.report([14.5] * 3)
         await rig.advance(0.5)
-        assert rig.amps == [16]
+        assert rig.amps == [10, 16]
     finally:
         await rig.stop()
 
@@ -312,12 +314,12 @@ async def test_clock_and_coalescing_end_on_unload(hass, freezer):
     assert coordinator._calc_timer is None
     assert coordinator._remove_listeners == []
     await rig.advance(30)
-    assert rig.amps == []
+    assert rig.amps == [16]
     assert rig.frc == []
 
 
 # ---------------------------------------------------------------------------
-# D-10 / R-1, R-7: start state
+# D-10, D-19 / R-1, R-7, V-1, V-3: start state
 # ---------------------------------------------------------------------------
 
 
@@ -325,10 +327,10 @@ async def test_clock_and_coalescing_end_on_unload(hass, freezer):
     "amp", ["16", None, "unavailable"], ids=["amp_16", "missing", "unavailable"]
 )
 async def test_r1_fresh_start_reduces_at_first_sample(hass, freezer, amp):
-    """R-1 / D-10 c: charger at 16 A, coordinator freshly started, target 10 A.
+    """R-1 / D-19: charger at 16 A, coordinator freshly started, target 10 A.
 
-    The reduction is sent at the first sample. An unreadable amp entity is
-    taken as max_current (16 A), which gives the same reduction.
+    The first command, sent at the first sample, is the target: it is below the
+    measured 15.5 A, whatever the amp entity shows.
     """
     rig = Rig(hass, freezer)
     # h = 28.5 - 15.5 = 13 A → budget 25 - 13 - 2 = 10 A
@@ -349,10 +351,10 @@ async def test_reconnect_after_disconnect_parks_at_min_then_starts_at_once(hass,
     rig = Rig(hass, freezer)
     await rig.start(phases=[20.5] * 3, charger=[15.5] * 3, amp="16")
     try:
-        assert rig.amps == []
+        assert rig.amps == [16]
         rig.car("Idle")
         await hass.async_block_till_done()
-        assert rig.amps == [6]
+        assert rig.amps == [16, 6]
 
         rig.charger([0.0] * 3)
         rig.report([5.0] * 3)
@@ -361,14 +363,14 @@ async def test_reconnect_after_disconnect_parks_at_min_then_starts_at_once(hass,
         await hass.async_block_till_done()
 
         # h = 5 A → budget 18 A → 16 A
-        assert rig.amps == [6, 16]
+        assert rig.amps == [16, 6, 16]
         assert rig.frc == []
     finally:
         await rig.stop()
 
 
 async def test_r7_failsafe_reduce_then_recovery_raises_only_through_k4(hass, freezer):
-    """R-7 / D-10 c: after a failsafe reduction the belief is the sent value.
+    """R-7 / D-19: after a failsafe reduction the belief is the sent value.
 
     After recovery a lower target than the old 16 A is an increase from 6 A and
     must pass K-4; here the sample is not unambiguous, so nothing is sent.
@@ -378,7 +380,7 @@ async def test_r7_failsafe_reduce_then_recovery_raises_only_through_k4(hass, fre
     try:
         hass.states.async_set(PHASE_SENSORS[1], "unavailable")
         await rig.advance(0.5)
-        assert rig.amps == [6]
+        assert rig.amps == [16, 6]
         assert rig.coordinator.last_sent_amp == 6
 
         # The charger follows; its amp entity shows the sent value.
@@ -390,6 +392,95 @@ async def test_r7_failsafe_reduce_then_recovery_raises_only_through_k4(hass, fre
             await rig.advance(5)
 
         assert rig.coordinator.state.value == "balancing"
+        assert rig.amps == [16, 6]
+    finally:
+        await rig.stop()
+
+
+async def test_v1_failsafe_recovery_does_not_reread_lagging_amp_entity(hass, freezer):
+    """V-1 / D-19: at recovery the amp entity still shows 16 A after the failsafe 6 A.
+
+    The belief stays the 6 A the coordinator sent. The sample after recovery is
+    ambiguous (the 15.5 A from before the failsafe is still in the window) and
+    only proves h >= 9 A, i.e. target 14 A: an increase, which K-4 refuses.
+    Re-reading the entity would make 14 A look like a reduction and send it,
+    although the household may be up to 19 A.
+    """
+    rig = Rig(hass, freezer)
+    await rig.start(phases=[20.5] * 3, charger=[15.5] * 3, amp="16")
+    try:
+        hass.states.async_set(PHASE_SENSORS[1], "unavailable")
+        await rig.advance(0.5)
+        assert rig.amps == [16, 6]
+
+        rig.charger([5.5] * 3)
+        # low = 24.5 - 15.5 = 9 A, high = 24.5 - 5.5 = 19 A
+        for _ in range(10):
+            rig.report([24.5] * 3)
+            await rig.advance(1)
+            assert rig.coordinator.state.value == "balancing"
+            assert rig.amps == [16, 6]
+    finally:
+        await rig.stop()
+
+
+@pytest.mark.parametrize("amp", [None, "16"], ids=["amp_unreadable", "amp_16_but_draws_5_5"])
+async def test_v1_first_command_never_above_measured_current(hass, freezer, amp):
+    """V-1 / D-19: the charger really runs at 6 A (draws 5.5 A), the household allows 13 A.
+
+    Whether the amp entity cannot be read (taken as 16 A) or shows 16 A, the first
+    command is the measured 6 A, and 13 A comes only through K-4: when the first
+    command has left the 15 s window.
+    """
+    rig = Rig(hass, freezer)
+    # h = 15.5 - 5.5 = 10 A → budget 13 A
+    await rig.start(phases=[15.5] * 3, charger=[5.5] * 3, amp=amp)
+    try:
+        first_at = rig.call_times[0]
+        assert rig.amps == [6]
+        for _ in range(30):
+            rig.report([15.5] * 3)
+            await rig.advance(1)
+            if len(rig.amps) > 1:
+                break
+        assert rig.amps == [6, 13]
+        assert (rig.call_times[1] - first_at).total_seconds() >= 15
+    finally:
+        await rig.stop()
+
+
+async def test_v1_first_command_corrects_belief_that_is_too_low(hass, freezer):
+    """D-19: the amp entity shows 13 A but the charger draws 15.5 A; the target is 14 A.
+
+    The first command is 14 A, sent at once; trusting the entity would make 14 A
+    an increase that K-4 blocks while the charger keeps drawing 16 A.
+    """
+    rig = Rig(hass, freezer)
+    # h = 24.5 - 15.5 = 9 A → budget 14 A
+    await rig.start(phases=[24.5] * 3, charger=[15.5] * 3, amp="13")
+    try:
+        assert rig.amps == [14]
+    finally:
+        await rig.stop()
+
+
+async def test_v3_car_status_known_after_start_while_charging_gives_no_raise(hass, freezer):
+    """V-3 / D-19: car status unknown at start, then Charging while the car draws 5.5 A.
+
+    The IDLE → BALANCING transition is not a plug-in: the charger draws current,
+    so the first command is the measured 6 A, not the household's 13 A.
+    """
+    rig = Rig(hass, freezer)
+    # h = 15.5 - 5.5 = 10 A → budget 13 A
+    await rig.start(phases=[15.5] * 3, charger=[5.5] * 3, amp="16", car="unknown")
+    try:
+        assert rig.coordinator.state.value == "idle"
+        assert rig.amps == []
+        rig.car("Charging")
+        await rig.advance(1)
+        assert rig.coordinator.state.value == "balancing"
+        assert rig.amps == [6]
+        await _report_every_5s(rig, [15.5] * 3, 10)
         assert rig.amps == [6]
     finally:
         await rig.stop()
@@ -473,7 +564,8 @@ async def test_r5_upswitch_reduces_to_l2_l3_budget_before_psm(hass, freezer):
     )
     try:
         await _report_every_5s(rig, [20.5, 11.0, 5.0], 70)
-        assert rig.commands[:2] == [("amp", "12"), ("psm", "2")], rig.commands
+        # The first is the first command after setup (D-19).
+        assert rig.commands[:3] == [("amp", "16"), ("amp", "12"), ("psm", "2")], rig.commands
     finally:
         await rig.stop()
 
@@ -490,7 +582,7 @@ async def test_r6_resume_is_capped_by_hold_time_ceiling(hass, freezer):
     try:
         rig.report([34.5] * 3)
         await rig.advance(0.5)
-        assert rig.amps == [6]
+        assert rig.amps == [16, 6]
         rig.charger([5.5] * 3)
         for _ in range(6):
             rig.report([24.5] * 3)
@@ -507,7 +599,7 @@ async def test_r6_resume_is_capped_by_hold_time_ceiling(hass, freezer):
             if len(rig.frc) > 1:
                 break
         assert rig.frc == ["1", "0"]
-        assert rig.amps == [6, 11]
+        assert rig.amps == [16, 6, 11]
     finally:
         await rig.stop()
 
@@ -520,18 +612,21 @@ async def test_r6_resume_is_capped_by_hold_time_ceiling(hass, freezer):
 async def test_r8_unavailable_charger_sensor_gives_no_increase(hass, freezer):
     """R-8 / D-16: with the charger sensors unavailable the substitute (last sent amp)
 
-    is constant, but it is no measurement: no increase however long it lasts.
+    is constant, but it is no measurement: after the first command no increase,
+    however long it lasts.
     """
     rig = Rig(hass, freezer)
     for sensor in CHARGER_CURRENT_SENSORS:
         hass.states.async_set(sensor, "unavailable")
-    # belief 10 A from the amp entity; h = 15 - 10 = 5 A → target 16 A
-    await rig.start(phases=[15.0] * 3, charger=[], amp="10")
+    # belief 10 A from the amp entity; h = 20 - 10 = 10 A → first command 13 A (A-17)
+    await rig.start(phases=[20.0] * 3, charger=[], amp="10")
     for sensor in CHARGER_CURRENT_SENSORS:
         hass.states.async_set(sensor, "unavailable")
     try:
+        assert rig.amps == [13]
+        # h = 15 - 13 = 2 A at most → target 16 A
         await _report_every_5s(rig, [15.0] * 3, 60)
-        assert rig.amps == []
+        assert rig.amps == [13]
     finally:
         await rig.stop()
 
@@ -544,24 +639,25 @@ async def test_r7_failsafe_command_counts_as_change_in_window(hass, freezer):
     failsafe command has left the 15 s window.
     """
     rig = Rig(hass, freezer)
-    # h = 14 - 4 = 10 A → budget 13 A = the charger's setting
+    # h = 14 - 4 = 10 A → budget 13 A = the charger's setting; the first command
+    # is the measured 4 A raised to min (D-19), then K-4 gives 13 A again.
     await rig.start(phases=[14.0] * 3, charger=[4.0] * 3, amp="13")
     try:
-        await _report_every_5s(rig, [14.0] * 3, 20)
-        assert rig.amps == []
+        await _report_every_5s(rig, [14.0] * 3, 25)
+        assert rig.amps == [6, 13]
         hass.states.async_set(PHASE_SENSORS[1], "unavailable")
         await rig.advance(0.5)
         failsafe_at = dt_util.utcnow()
-        assert rig.amps == [6]
+        assert rig.amps == [6, 13, 6]
         hass.states.async_set(CHARGER_ENTITIES["amp"], "6")
 
         rig.report([14.0] * 3)
         await rig.advance(5)
         await _report_every_5s(rig, [14.0] * 3, 5)
-        assert rig.amps == [6]
+        assert rig.amps == [6, 13, 6]
 
         await _report_every_5s(rig, [14.0] * 3, 10)
-        assert rig.amps == [6, 13]
+        assert rig.amps == [6, 13, 6, 13]
         assert (dt_util.utcnow() - failsafe_at).total_seconds() >= 15
     finally:
         await rig.stop()
@@ -755,11 +851,12 @@ async def test_t10_charger_changes_without_phase_report_send_nothing(hass, freez
     rig = Rig(hass, freezer)
     await rig.start(phases=[20.5] * 3, charger=[15.5] * 3, amp="16")
     try:
+        assert rig.commands == [("amp", "16")]
         for value in (12.0, 9.0, 6.0, 5.5):
             rig.charger([value] * 3)
             await rig.advance(1)
         await rig.advance(40)
-        assert rig.commands == []
+        assert rig.commands == [("amp", "16")]
     finally:
         await rig.stop()
 
@@ -767,20 +864,26 @@ async def test_t10_charger_changes_without_phase_report_send_nothing(hass, freez
 async def test_t12_increase_waits_until_history_covers_window(hass, freezer):
     """T-12: right after start an increase waits until the history covers the 15 s window.
 
-    No command is sent before (belief 10 A read from the charger), so only the
-    history can block; the reports are unambiguous from 15 s after setup.
+    The first command after setup (D-19, the measured 10 A) is in the window as
+    well and leaves it 1 s after the history covers it; the history alone is
+    covered in test_load_estimator.
     """
     rig = Rig(hass, freezer, _entry({"up_hold_seconds": 0}))
     setup_at = dt_util.utcnow()
-    await rig.start(phases=[20.5] * 3, charger=[15.5] * 3, amp="10")
+    # h = 14.5 - 9.5 = 5 A → target 16 A
+    await rig.start(phases=[14.5] * 3, charger=[9.5] * 3, amp="10")
     try:
+        assert rig.amps == [10]
         for _ in range(30):
-            rig.report([20.5] * 3)
+            rig.report([14.5] * 3)
             await rig.advance(1)
-        assert rig.amps == [16]
-        raised_at = (rig.call_times[0] - setup_at).total_seconds()
+        assert rig.amps == [10, 16]
+        first_at = (rig.call_times[0] - setup_at).total_seconds()
+        raised_at = (rig.call_times[1] - setup_at).total_seconds()
         # history starts with the first calculation, 0.2 s after setup; reports every 1 s
-        assert 15.2 <= raised_at <= 15.2 + 1 + 0.2, raised_at
+        assert raised_at >= 15.2, raised_at
+        assert raised_at >= first_at + 15, (first_at, raised_at)
+        assert raised_at <= first_at + 15 + 1 + 0.2, (first_at, raised_at)
     finally:
         await rig.stop()
 
@@ -805,7 +908,7 @@ async def test_t13_sensor_loss_through_listener_failsafe_and_recovery(hass, free
         hass.states.async_set(PHASE_SENSORS[1], "unavailable")
         await rig.advance(0.5)
         assert coordinator.state.value == "failsafe"
-        assert rig.amps == [6]
+        assert rig.amps == [16, 6]
 
         calls.clear()
         for car in ("Complete", "Charging"):
