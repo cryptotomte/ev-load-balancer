@@ -1083,6 +1083,91 @@ async def test_t12_no_history_allows_reduction_but_not_increase(hass, full_confi
 
 
 @pytest.mark.asyncio
+async def test_recalculation_without_new_report_keeps_estimate(hass, full_config_entry):
+    """K-3: a calculation triggered without a new phase report (car_value, map, pha)
+
+    keeps the estimate; an old phase value is not compared with newer charger values.
+    """
+    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
+        mock_debouncer_cls.return_value = MagicMock()
+        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+    coordinator._dispatcher.send_amp = AsyncMock(return_value=True)
+    sm = coordinator._state_machine
+    sm.record_successful_calculation()
+    sm.record_successful_calculation()
+    sm.on_car_connected()
+    coordinator._last_sent_amp = 15
+    T0 = datetime(2025, 1, 1, 12, 0, 0)
+
+    hass.states.async_set("sensor.goe_409787_map", "[1, 2, 3]")
+    hass.states.async_set("sensor.goe_409787_car_value", "Charging")
+    for sensor in ("nrg_4", "nrg_5", "nrg_6"):
+        hass.states.async_set(f"sensor.goe_409787_{sensor}", "15.5")
+    for sensor in ("sensor.current_l1", "sensor.current_l2", "sensor.current_l3"):
+        hass.states.async_set(sensor, "23.5")
+    # h = 23.5 - 15.5 = 8 A → budget 15 A
+    with patch("custom_components.ev_load_balancer.sensor.utcnow", return_value=T0):
+        await coordinator._async_calculate()
+
+    for sensor in ("nrg_4", "nrg_5", "nrg_6"):
+        hass.states.async_set(f"sensor.goe_409787_{sensor}", "6.0")
+    hass.states.async_set("sensor.goe_409787_car_value", "Complete")
+    with patch(
+        "custom_components.ev_load_balancer.sensor.utcnow",
+        return_value=T0 + timedelta(seconds=40),
+    ):
+        await coordinator._async_calculate()
+
+    coordinator._dispatcher.send_amp.assert_not_called()
+    assert coordinator.last_result.charger_budget_l1 == pytest.approx(15.0)
+
+
+@pytest.mark.asyncio
+async def test_sent_command_counts_as_change_in_window(hass, full_config_entry):
+    """P-2 guard (spec 6.1): after a sent command, reports within the window are not
+
+    unambiguous, so no increase follows until the command has left the window.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN, data=dict(full_config_entry.data), options={"up_hold_seconds": 0}
+    )
+    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
+        mock_debouncer_cls.return_value = MagicMock()
+        coordinator = EVLoadBalancerCoordinator(hass, entry)
+    coordinator._dispatcher.send_amp = AsyncMock(return_value=True)
+    sm = coordinator._state_machine
+    sm.record_successful_calculation()
+    sm.record_successful_calculation()
+    sm.on_car_connected()
+    coordinator._last_sent_amp = 14
+    T0 = datetime(2025, 1, 1, 12, 0, 0)
+
+    for sensor in ("nrg_4", "nrg_5", "nrg_6"):
+        hass.states.async_set(f"sensor.goe_409787_{sensor}", "0.0")
+    hass.states.async_set("sensor.goe_409787_map", "[1, 2, 3]")
+    hass.states.async_set("sensor.goe_409787_car_value", "Charging")
+
+    async def report_at(seconds: float, load: str) -> None:
+        for sensor in ("sensor.current_l1", "sensor.current_l2", "sensor.current_l3"):
+            hass.states.async_set(sensor, load)
+        with patch(
+            "custom_components.ev_load_balancer.sensor.utcnow",
+            return_value=T0 + timedelta(seconds=seconds),
+        ):
+            await coordinator._async_calculate()
+
+    await report_at(-30, "11.0")  # historik som täcker fönstret, mål 12 A < 14 A
+    coordinator._dispatcher.send_amp.assert_called_once_with(12)
+    await report_at(0, "15.0")  # 25 - 15 - 2 = 8 A
+    coordinator._dispatcher.send_amp.assert_called_with(8)
+
+    await report_at(10, "11.0")  # cooldown passerad, fönstret innehåller kommandot
+    assert coordinator._dispatcher.send_amp.call_count == 2
+    await report_at(15.1, "11.0")
+    coordinator._dispatcher.send_amp.assert_called_with(12)
+
+
+@pytest.mark.asyncio
 async def test_no_command_if_less_than_cooldown_since_last_change(hass, full_config_entry):
     """Ingen uppreglering om < 5s sedan senaste ändring."""
     with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:

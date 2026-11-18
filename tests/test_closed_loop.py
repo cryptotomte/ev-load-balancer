@@ -135,6 +135,7 @@ class ClosedLoop:
         self._steps = 0
         self._next_charger_sensor = 0.0
         self._car_value = ""
+        self._deferred: list[tuple[str, str]] = []
         self._number_calls: list[ServiceCall] = []
         self._select_calls: list[ServiceCall] = []
         self._seen_number = 0
@@ -145,6 +146,9 @@ class ClosedLoop:
         return [h + c for h, c in zip(self.household(self.now), self.charger.per_phase())]
 
     def _write_inputs(self) -> None:
+        for sensor, text in self._deferred:
+            self._write_phase(sensor, text)
+        self._deferred = []
         if self.now + 1e-9 >= self._next_charger_sensor:
             for sensor, value in zip(CHARGER_CURRENT_SENSORS, self.charger.per_phase()):
                 self.hass.states.async_set(sensor, f"{value:.2f}")
@@ -160,12 +164,16 @@ class ClosedLoop:
             self.trace.meter_reports.append(self.now)
             if self.meter.last_read_t != read_t:
                 self.trace.new_meter_values.append(self.now)
-            for sensor, value in zip(PHASE_SENSORS, report):
-                text = f"{value:.2f}"
-                current = self.hass.states.get(sensor)
-                # P-3 false: an integration that only writes changed values.
-                if self.reports_unchanged or current is None or current.state != text:
-                    self.hass.states.async_set(sensor, text)
+            texts = [f"{value:.2f}" for value in report]
+            self._write_phase(PHASE_SENSORS[0], texts[0])
+            # L2 and L3 arrive one step later, within the 0.2 s of one sample (K-6).
+            self._deferred = list(zip(PHASE_SENSORS[1:], texts[1:]))
+
+    def _write_phase(self, sensor: str, text: str) -> None:
+        current = self.hass.states.get(sensor)
+        # P-3 false: an integration that only writes changed values.
+        if self.reports_unchanged or current is None or current.state != text:
+            self.hass.states.async_set(sensor, text)
 
     def _apply_commands(self) -> None:
         for call in self._number_calls[self._seen_number :]:
@@ -456,17 +464,24 @@ async def test_t7_shortage_during_dwell_reduces_then_pauses(hass, freezer):
 
 @pytest.mark.parametrize("meter", METERS.values(), ids=METERS.keys())
 async def test_t11_one_command_per_sample(hass, freezer, meter):
-    """T-11 / K-6: the three phases arrive together; a step gives one command, not three."""
+    """T-11 / K-6: phase values 0.1 s apart are one sample and give one command.
+
+    L1 +3 A alone would give 15 A, L2 +6 A gives 12 A: one command to 12 A, not two.
+    """
+
+    def load(t: float) -> list[float]:
+        return [8.0, 11.0, 5.0] if t >= 61.0 else [5.0, 5.0, 5.0]
+
     trace = await _run(
         hass,
         freezer,
-        step([5.0, 5.0, 5.0], phase=1, delta=6.0, start=61.0),
+        load,
         Charger(amp=16),
         Meter(**meter),
         duration=120,
     )
 
-    assert trace.amps, trace.amps
+    assert [a for _, a in trace.amps] == [12], trace.amps
     assert _commands_per_meter_report(trace) == 1, (trace.amps, trace.meter_reports)
 
 
