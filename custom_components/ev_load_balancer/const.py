@@ -90,6 +90,9 @@ ESTIMATE_TIGHT_TOLERANCE = 0.5
 SAMPLE_COALESCE_SECONDS = 0.2
 """Fasrapporter inom denna tid behandlas som ett mätvärde (K-6)."""
 
+CLOCK_RECALC_SECONDS = 5.0
+"""Tidsstyrd omräkning under laddning och paus, utan nytt mätvärde (D-12)."""
+
 PSM_VALUE_AUTO = "0"
 """PSM select-värde för auto-förhandling med bilen (laddaren väljer fas självständigt)."""
 

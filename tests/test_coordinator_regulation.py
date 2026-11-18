@@ -198,3 +198,70 @@ async def test_r2_report_during_slow_command_is_not_dropped(hass, freezer):
     finally:
         release.set()
         await rig.stop()
+
+
+# ---------------------------------------------------------------------------
+# D-12 / R-3: the 5 s clock
+# ---------------------------------------------------------------------------
+
+
+async def test_clock_pauses_15s_after_shortage_without_sensor_events(hass, freezer):
+    """R-3 / D-12: the pause comes ca 15 s after the shortage, with no further reports.
+
+    h = 34.5 - 15.5 = 19 A gives a budget of 4 A < 6 A: reduction to 6 A at once,
+    then the existing pause logic, driven only by the clock.
+    """
+    rig = Rig(hass, freezer)
+    coordinator = await rig.start(phases=[20.5] * 3, charger=[15.5] * 3, amp="16")
+    coordinator._last_sent_amp = 16
+    try:
+        rig.report([34.5] * 3)
+        shortage = dt_util.utcnow()
+        await rig.advance(0.5)
+        assert rig.amps == [6]
+
+        pause_after = None
+        for _ in range(300):
+            await rig.advance(0.1)
+            if rig.frc:
+                pause_after = (dt_util.utcnow() - shortage).total_seconds()
+                break
+        assert rig.frc == ["1"]
+        assert 15 <= pause_after <= 15 + 5 + 0.5, pause_after
+    finally:
+        await rig.stop()
+
+
+async def test_clock_is_not_a_sample(hass, freezer):
+    """D-12: clock recalculations alone never make an estimate unambiguous.
+
+    The only report came before the history covered the window, so an increase
+    must wait for the next report, however many clock ticks pass.
+    """
+    rig = Rig(hass, freezer)
+    coordinator = await rig.start(phases=[20.5] * 3, charger=[15.5] * 3, amp="10")
+    coordinator._last_sent_amp = 10
+    try:
+        await rig.advance(60)
+        assert rig.amps == []
+
+        rig.report([20.5] * 3)
+        await rig.advance(0.5)
+        assert rig.amps == [16]
+    finally:
+        await rig.stop()
+
+
+async def test_clock_and_coalescing_end_on_unload(hass, freezer):
+    """D-12 / 13.3: after shutdown no clock, no pending calculation, no command."""
+    rig = Rig(hass, freezer)
+    coordinator = await rig.start(phases=[20.5] * 3, charger=[15.5] * 3, amp="16")
+    coordinator._last_sent_amp = 16
+    rig.report([34.5] * 3)
+    await rig.stop()
+
+    assert coordinator._calc_timer is None
+    assert coordinator._remove_listeners == []
+    await rig.advance(30)
+    assert rig.amps == []
+    assert rig.frc == []

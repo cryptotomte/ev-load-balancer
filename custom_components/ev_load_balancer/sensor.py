@@ -21,7 +21,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -39,6 +39,7 @@ from homeassistant.helpers.event import (
     async_call_later,
     async_track_state_change_event,
     async_track_state_report_event,
+    async_track_time_interval,
 )
 from homeassistant.util.dt import utcnow
 
@@ -46,6 +47,7 @@ from .calculator import CalculationResult, calculate
 from .charger_profiles import PROFILES
 from .command_dispatcher import CommandDispatcher
 from .const import (
+    CLOCK_RECALC_SECONDS,
     CONF_ACTION_ON_SENSOR_LOSS,
     CONF_CAPACITY_WARNING_THRESHOLD,
     CONF_CHARGER_ENTITIES,
@@ -514,6 +516,12 @@ class EVLoadBalancerCoordinator:
                 )
             )
 
+        self._remove_listeners.append(
+            async_track_time_interval(
+                self.hass, self._on_clock, timedelta(seconds=CLOCK_RECALC_SECONDS)
+            )
+        )
+
         self._schedule_calculation()
 
     async def async_shutdown(self) -> None:
@@ -539,6 +547,18 @@ class EVLoadBalancerCoordinator:
         self._calc_timer = async_call_later(
             self.hass, SAMPLE_COALESCE_SECONDS, self._on_coalesce_timer
         )
+
+    @callback
+    def _on_clock(self, _now: datetime) -> None:
+        """Låt tidsvillkoren löpa ut även när inga mätvärden kommer (D-12, R-3).
+
+        Paus, återstart, uppväxling, uppehållstid och hålltid prövas bara i en
+        beräkning, och fassensorn skriver inte oförändrade värden (P-3 falskt).
+        Omräkningen behandlar ingen rapport, så den är inget mätvärde och gör
+        ingen skattning entydig.
+        """
+        if self._state_machine.state in (BalancerState.BALANCING, BalancerState.PAUSED):
+            self._schedule_calculation()
 
     @callback
     def _cancel_scheduled_calculation(self) -> None:
