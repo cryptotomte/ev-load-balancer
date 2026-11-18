@@ -224,6 +224,8 @@ class ClosedLoop:
             self.freezer.tick(DT)
             self.charger.advance(self.now, DT)
             self._write_inputs()
+            # Let the listeners schedule their timers before firing the due ones.
+            await self.hass.async_block_till_done(wait_background_tasks=True)
             # Exact: the plain helper adds 0.5 s and would fire the 0.2 s coalescing
             # timer (K-6) one step early.
             async_fire_time_changed_exact(self.hass, dt_util.utcnow())
