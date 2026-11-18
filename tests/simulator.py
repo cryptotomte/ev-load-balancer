@@ -10,6 +10,7 @@ is read by Home Assistant with a delay. Parameters come from spec 2.2
 
 from __future__ import annotations
 
+import random
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -126,37 +127,51 @@ class Meter:
     Assistant first sees it ``delay_s`` after the telegram and reads it again
     every ``poll_s`` until the next telegram arrives (spec 2.2: telegrams every
     10 s, value 2.2-6.3 s old on arrival, dongle polled every 5 s).
+
+    With ``seed`` set, each telegram gets its own delay drawn from
+    ``delay_range`` and each poll interval varies by up to ``poll_jitter_s``,
+    reproducibly.
     """
 
     delay_s: float = 4.0
     telegram_s: float = 10.0
     poll_s: float = 5.0
-    telegrams: list[tuple[float, list[float]]] = field(default_factory=list)
+    delay_range: tuple[float, float] | None = None
+    poll_jitter_s: float = 0.0
+    seed: int | None = None
+    telegrams: list[tuple[float, float, list[float]]] = field(default_factory=list)
     next_telegram: float = 0.0
     next_poll: float = 0.0
     last_read_t: float | None = None
 
+    def __post_init__(self) -> None:
+        self._rng = random.Random(self.seed)
+
+    def _poll_interval(self) -> float:
+        return self.poll_s + self._rng.uniform(-self.poll_jitter_s, self.poll_jitter_s)
+
     def sample(self, now: float, total: list[float]) -> None:
         """Take a telegram when one is due."""
         if now + 1e-9 >= self.next_telegram:
-            self.telegrams.append((now, list(total)))
+            delay = self._rng.uniform(*self.delay_range) if self.delay_range else self.delay_s
+            self.telegrams.append((now, delay, list(total)))
             self.next_telegram += self.telegram_s
 
     def report(self, now: float) -> list[float] | None:
         """Return the value Home Assistant reads at ``now``, or None between reads.
 
         A new telegram is read when it arrives; the same telegram is read again
-        every ``poll_s`` until the next one arrives.
+        every poll interval until the next one arrives.
         """
-        arrived = [(t, v) for t, v in self.telegrams if t + self.delay_s <= now + 1e-9]
+        arrived = [(t, v) for t, d, v in self.telegrams if t + d <= now + 1e-9]
         if not arrived:
             return None
         latest_t, latest = arrived[-1]
         if latest_t != self.last_read_t:
             self.last_read_t = latest_t
-            self.next_poll = now + self.poll_s
+            self.next_poll = now + self._poll_interval()
             return latest
         if now + 1e-9 >= self.next_poll:
-            self.next_poll += self.poll_s
+            self.next_poll += self._poll_interval()
             return latest
         return None
