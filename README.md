@@ -106,17 +106,27 @@ and dashboard cards:
    capped like an increase (step 5).
 8. **Phase switching**: 3 → 1 phase at once when a phase lacks capacity; 1 → 3 phase when all
    phases have had at least min_current for 60 s. Before switching up, the current is first
-   reduced to what all phases allow. No new phase switch within 300 s of the previous one;
-   during that time a shortage is handled by a lower current and, if needed, a pause.
-9. **Clock**: While charging or paused, the balancer recalculates every 5 s with the existing
-   estimate, so the pause, resume, phase switch and hold timers run out even when no new
-   phase values arrive. This is not a new sample.
-10. **Car plugged in or out**: When the car is plugged in, the calculated current is sent at
-    once. When it is unplugged, the current is set to min_current.
-11. **Start and reload**: The balancer reads the charger's current setting (`amp`) and starts
-    from it (max_current if it cannot be read), so a lower target is sent with the first
-    sample. If a car is charging, the phase setting (`psm`) is left as it is and no phase
-    switch is made for 300 s.
+   reduced to what all phases allow, including the highest household load of the hold time
+   on each phase; if that is below min_current, no switch is made. No new phase switch within
+   300 s of the previous one, and the 60 s count starts only after those 300 s, so an
+   up-switch comes 360 s after a down-switch at the earliest. During that time a shortage is
+   handled by a lower current and, if needed, a pause.
+9. **Clock**: While starting up, charging or paused, the balancer recalculates every 5 s with
+   the existing estimate, so start-up, the pause, resume, phase switch and hold timers run out
+   even when no new phase values arrive. This is not a new sample.
+10. **Car plugged in or out**: When the car is plugged in and the charger draws no current
+    yet, the calculated current is sent at once, capped by the highest household load of the
+    hold time (step 5). When it is unplugged, the current is set to min_current.
+11. **Start and reload**: The charger's current setting (`amp`) shown in Home Assistant is
+    not trusted. When the balancer first sees the car connected and the charger is already
+    drawing current (a restart or reload while charging, or a car status that becomes known
+    only after the start), it sends one synchronising command at once: the lower of the
+    target and the charger's measured current rounded up, but at least min_current. It can
+    never raise what the charger actually draws; any increase after it follows step 5. If
+    the charger's current cannot be measured, the command is the target capped as in
+    step 10. If a car is charging, or the car status cannot be read at the start (counted
+    as charging), the phase setting (`psm`) is left as it is and no phase switch is made for
+    300 s.
 
 ---
 
@@ -134,8 +144,8 @@ Verify the following before installation:
 
 **Home Assistant integrations:**
 - [ ] Charger integration installed in HA (e.g. [ha-goecharger-api2](https://github.com/cathiele/ha-goecharger-api2) for go-e)
-- [ ] Phase sensors exposed in HA (e.g. via P1 port, Shelly EM) that update at least every
-      20 seconds — see the note below the table
+- [ ] Phase sensors exposed in HA (e.g. via P1 port, Shelly EM) that update often enough for
+      the measurement window: every 10 seconds with the defaults — see the note below the table
 
 **Network requirements:**
 - [ ] Home Assistant and the EV charger on the same network (or routable)
@@ -154,15 +164,19 @@ Verify the following before installation:
 > not at the distribution board or at the charger. It is the total load per phase
 > that determines whether the fuse is at risk of tripping.
 
-> **Update rate:** A phase sensor must update at least every 20 seconds. A new phase value
-> is what lets the balancer reduce the current, so a slow sensor delays every reduction.
-> Measured counter-example: Nibe's current sensors (BE1–BE3) are written every 61 seconds
-> and are not good enough.
+> **Update rate:** The default measurement window (15 s) suits a phase sensor whose value
+> updates every 10 seconds. A slower sensor needs a longer window: the window must be longer
+> than the sensor's update interval plus the time a value takes to reach Home Assistant, and
+> it can be at most 30 seconds (see Advanced settings). A sensor slower than that is not
+> suitable. A new phase value is also what lets the balancer reduce the current, so a slow
+> sensor delays every reduction. Measured counter-example: Nibe's current sensors (BE1–BE3)
+> are written every 61 seconds and are not good enough.
 >
 > **Sensors that only report changes:** Some integrations write a sensor only when its
-> value changes. The balancer then raises the charge current after one of its own
-> adjustments only once every active phase has reported a new value, so a raise can be
-> delayed while a phase stays exactly steady. Reductions are never delayed by this.
+> value changes. After one of its own adjustments the balancer then raises the charge
+> current, or resumes charging after a pause, only once every active phase has reported a
+> new value. While a phase value stays exactly the same, the raise or the resume does not
+> come at all. Reductions are never delayed by this.
 
 ---
 
@@ -192,6 +206,11 @@ how to contribute support for your charger model.
 - [ ] `select.*_frc` — force charge status (pause/resume), writable
 - [ ] `select.*_psm` (optional) — phase selection (1/3 phase), writable
 - [ ] `sensor.*_nrg_4/5/6` (optional) — current per phase, readable
+
+> **Without the charger's current sensors** (`nrg_4/5/6`, e.g. a generic profile that does
+> not define them) the balancer can never prove that the household load has gone down.
+> The current is then never raised after the first value sent at plug-in or after a
+> restart, and charging never resumes after a pause.
 
 ---
 
@@ -368,7 +387,7 @@ active and shows a calculated value.
 **Check:**
 1. Verify that the phase sensors work: open **Developer Tools** → **States**
    and search for your phase sensors
-2. Check the network connection to the current meter (Nibe, Shelly, P1 port)
+2. Check the network connection to the current meter (Shelly, P1 port)
 3. If phase sensors are unavailable the **failsafe** activates — check the selected action
    (reduce/pause) in Options Flow
 4. Restart Home Assistant and wait ~30 seconds for sensors to initialize
