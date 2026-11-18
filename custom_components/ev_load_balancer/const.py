@@ -43,7 +43,7 @@ CONF_PHASE_COUNT = "phase_count"
 # --- Cooldown och sensor-namnkonstanter (PR-03) ---
 
 COOLDOWN_SECONDS = 5.0
-"""Cooldown i sekunder för uppåtreglering (Debouncer trailing edge)."""
+"""Cooldown i sekunder för uppåtreglering (hysteres-kontrollern)."""
 
 # --- Hysteres-konstanter (PR-04) ---
 

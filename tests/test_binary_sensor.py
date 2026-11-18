@@ -11,7 +11,7 @@ Täcker:
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass
@@ -72,9 +72,7 @@ def _make_coordinator(entry: MockConfigEntry) -> EVLoadBalancerCoordinator:
     mock_hass.states = MagicMock()
     mock_hass.states.get = MagicMock(return_value=None)
 
-    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
-        mock_debouncer_cls.return_value = MagicMock()
-        return EVLoadBalancerCoordinator(mock_hass, entry)
+    return EVLoadBalancerCoordinator(mock_hass, entry)
 
 
 def _make_result(available_min: float) -> CalculationResult:
@@ -294,9 +292,7 @@ def test_capacity_warning_does_not_register_on_create(full_config_entry):
 @pytest.mark.asyncio
 async def test_capacity_warning_registers_in_async_added_to_hass(hass, full_config_entry):
     """Sensorn ska registrera sig hos koordinatorn i async_added_to_hass."""
-    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
-        mock_debouncer_cls.return_value = MagicMock()
-        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+    coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
 
     initial_count = len(coordinator._notify_listeners)
 
@@ -321,9 +317,7 @@ async def test_async_setup_entry_creates_binary_sensor(hass, full_config_entry):
     hass.data[DOMAIN][full_config_entry.entry_id] = {}
 
     # Skapa koordinatorn manuellt (normalt sköts detta av sensor platform)
-    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
-        mock_debouncer_cls.return_value = MagicMock()
-        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+    coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
 
     hass.data[DOMAIN][full_config_entry.entry_id]["coordinator"] = coordinator
 

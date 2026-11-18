@@ -77,7 +77,9 @@ class LoadEstimator:
     def record_device(self, now: datetime, values: list[float]) -> None:
         """Registrera laddarens ström per fas vid tidpunkten now."""
         self._device.append((now, list(values)))
-        cutoff = now - self._window
+        # 2W: rapporten behandlas efter sin rapporttid (last_reported), så dess
+        # fönster börjar före now − W.
+        cutoff = now - 2 * self._window
         # Senaste värdet före fönstret gäller vid fönstrets början och behålls.
         while len(self._device) > 1 and self._device[1][0] <= cutoff:
             self._device.pop(0)
@@ -111,6 +113,10 @@ class LoadEstimator:
         if before:
             in_window.append(before[-1])
         current = self._current_device(now, phase)
+        if not in_window:
+            # Rapporten är äldre än historiken (värdet skrevs före start). Laddarens
+            # ström då är okänd; historiken täcker inte fönstret, så inte entydigt.
+            in_window.append(current)
         in_window.extend(v[phase] for t, v in self._commands if start <= t <= now)
 
         device_min = min(in_window)
@@ -158,5 +164,9 @@ class LoadEstimator:
         return peaks
 
     def _current_device(self, now: datetime, phase: int) -> float:
-        """Laddarens ström för fasen enligt senaste värde vid eller före now."""
-        return [v[phase] for t, v in self._device if t <= now][-1]
+        """Laddarens ström för fasen enligt senaste värde vid eller före now.
+
+        Före första värdet gäller det första värdet.
+        """
+        earlier = [v[phase] for t, v in self._device if t <= now]
+        return earlier[-1] if earlier else self._device[0][1][phase]

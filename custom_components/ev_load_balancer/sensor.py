@@ -17,6 +17,7 @@ Events skickas till HA:s event bus vid viktiga tillståndsändringar (PR-07).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import Callable
@@ -30,12 +31,12 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE, UnitOfElectricCurrent
-from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.core import CALLBACK_TYPE, Event, HomeAssistant, callback
 from homeassistant.helpers import start as ha_start
-from homeassistant.helpers.debounce import Debouncer
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import (
+    async_call_later,
     async_track_state_change_event,
     async_track_state_report_event,
 )
@@ -232,15 +233,14 @@ class EVLoadBalancerCoordinator:
         # Lyssnarlista för sensor-callbacks
         self._notify_listeners: list[Callable] = []
 
-        # Slår ihop fasrapporter inom SAMPLE_COALESCE_SECONDS till en beräkning
-        # (K-6). Cooldown för höjning ligger i hysteres-kontrollern.
-        self._debouncer = Debouncer(
-            hass,
-            _LOGGER,
-            cooldown=SAMPLE_COALESCE_SECONDS,
-            immediate=False,
-            function=self._async_calculate,
-        )
+        # Egen sammanslagning (K-6, D-11): HA:s Debouncer tappade ett anrop som kom
+        # medan beräkningen väntade på laddaren (R-2). Cooldown för höjning ligger
+        # i hysteres-kontrollern.
+        self._calc_timer: CALLBACK_TYPE | None = None
+        self._calc_task: asyncio.Task | None = None
+        self._calc_running = False
+        self._calc_again = False
+        self._shut_down = False
 
         # Kapacitetsvarnings-state (för transition-detektion)
         self._last_capacity_warning: bool = False
@@ -514,16 +514,69 @@ class EVLoadBalancerCoordinator:
                 )
             )
 
-        # Kör initial beräkning direkt (schemalägger via debouncer)
-        self._debouncer.async_schedule_call()
+        self._schedule_calculation()
 
     async def async_shutdown(self) -> None:
-        """Avregistrera alla lyssnare och avbryt debouncer vid shutdown."""
-        self._debouncer.async_cancel()
+        """Avregistrera lyssnare och timrar; låt en pågående beräkning bli klar.
+
+        Beräkningen avbryts inte mitt i: ett avbrutet resume kunde lämna frc='0'
+        utan strömkommando.
+        """
+        self._shut_down = True
+        self._cancel_scheduled_calculation()
         for remove_fn in self._remove_listeners:
             remove_fn()
         self._remove_listeners.clear()
+        if self._calc_task is not None and not self._calc_task.done():
+            await self._calc_task
         self._notify_listeners.clear()
+
+    @callback
+    def _schedule_calculation(self) -> None:
+        """Beräkna efter SAMPLE_COALESCE_SECONDS; rapporter inom den tiden blir ett mätvärde."""
+        if self._shut_down or self._calc_timer is not None:
+            return
+        self._calc_timer = async_call_later(
+            self.hass, SAMPLE_COALESCE_SECONDS, self._on_coalesce_timer
+        )
+
+    @callback
+    def _cancel_scheduled_calculation(self) -> None:
+        """Avbryt en väntande beräkning och en begärd omkörning."""
+        if self._calc_timer is not None:
+            self._calc_timer()
+            self._calc_timer = None
+        self._calc_again = False
+
+    @callback
+    def _on_coalesce_timer(self, _now: datetime) -> None:
+        self._calc_timer = None
+        self._start_calculation()
+
+    @callback
+    def _start_calculation(self) -> None:
+        """Beräkna nu, eller direkt efter den beräkning som pågår (D-11).
+
+        En rapport som kommer medan beräkningen väntar på laddaren tappas alltså
+        inte; den väntar högst sammanslagningen plus den pågående beräkningen.
+        """
+        if self._shut_down:
+            return
+        if self._calc_running:
+            self._calc_again = True
+            return
+        self._calc_running = True
+        self._calc_task = self.hass.async_create_task(self._async_run_calculations())
+
+    async def _async_run_calculations(self) -> None:
+        try:
+            while True:
+                self._calc_again = False
+                await self._async_calculate()
+                if not self._calc_again or self._shut_down:
+                    return
+        finally:
+            self._calc_running = False
 
     @callback
     def _handle_state_change(self, event: Event) -> None:
@@ -542,26 +595,26 @@ class EVLoadBalancerCoordinator:
 
         if entity_id in self._phase_sensor_ids:
             if new_state is not None and new_state.state == "unavailable":
-                self._debouncer.async_cancel()
+                self._cancel_scheduled_calculation()
                 self.hass.async_create_task(self._async_handle_sensor_unavailable())
                 return
 
             if new_state is not None and new_state.state not in ("unavailable", "unknown"):
                 if self._state_machine.state == BalancerState.FAILSAFE:
-                    self._debouncer.async_cancel()
+                    self._cancel_scheduled_calculation()
                     self.hass.async_create_task(self._async_check_recovery())
                     return
 
         if self._state_machine.state == BalancerState.FAILSAFE:
             return
 
-        self._debouncer.async_schedule_call()
+        self._schedule_calculation()
 
     @callback
     def _handle_phase_report(self, event: Event) -> None:
         """Fassensor skrev samma värde igen: ett nytt mätvärde (K-1, K-3)."""
         if self._state_machine.state != BalancerState.FAILSAFE:
-            self._debouncer.async_schedule_call()
+            self._schedule_calculation()
 
     async def _async_handle_sensor_unavailable(self) -> None:
         """Hanterar sensorförlust — avgör om total eller enskild, triggar failsafe.
@@ -654,7 +707,7 @@ class EVLoadBalancerCoordinator:
         self._notify_all_listeners()
 
         # Starta beräkningscykel för att återta normal drift
-        self._debouncer.async_schedule_call()
+        self._schedule_calculation()
 
     def _read_device_values_sync(self) -> list[float]:
         """Läs laddarens ström per fas synkront.
@@ -749,8 +802,8 @@ class EVLoadBalancerCoordinator:
         """Asynkron beräkning — läser HA-state, kör calculator, skickar kommandon.
 
         Ordningen följer spec 010 avsnitt 6.2:
-        1. Nya fasrapporter (ändrad last_reported) uppdaterar skattningen (K-1).
-           Rapporttiden är beräkningens tid, högst SAMPLE_COALESCE_SECONDS senare.
+        1. Nya fasrapporter (ändrad last_reported) uppdaterar skattningen (K-1),
+           med last_reported som rapporttid (D-11).
         2. Budget per fas och mål via calculate().
         3. Fasväxlaren (med uppehållstiden i K-5).
         4. Hysteres: sänkning direkt, höjning högst till taket i K-4, paus som förut.
@@ -809,7 +862,7 @@ class EVLoadBalancerCoordinator:
         for idx, reported in enumerate(phase_reported):
             if reported != self._processed_reports[idx]:
                 self._processed_reports[idx] = reported
-                self._estimator.on_phase_report(now, idx, phase_values[idx])
+                self._estimator.on_phase_report(reported, idx, phase_values[idx])
         estimates = self._estimator.estimates
 
         # Parsa map för aktiva faser

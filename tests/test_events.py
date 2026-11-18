@@ -12,10 +12,11 @@ Täcker:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_capture_events
 
 from custom_components.ev_load_balancer.const import (
@@ -69,16 +70,14 @@ def full_config_entry():
 
 
 def _make_coordinator(entry: MockConfigEntry) -> EVLoadBalancerCoordinator:
-    """Hjälpfunktion: skapa koordinator med mockad Debouncer och hass.bus."""
+    """Hjälpfunktion: skapa koordinator med mockad hass och hass.bus."""
     mock_hass = MagicMock()
     mock_hass.states = MagicMock()
     mock_hass.states.get = MagicMock(return_value=None)
     mock_hass.bus = MagicMock()
     mock_hass.bus.async_fire = MagicMock()
 
-    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
-        mock_debouncer_cls.return_value = MagicMock()
-        return EVLoadBalancerCoordinator(mock_hass, entry)
+    return EVLoadBalancerCoordinator(mock_hass, entry)
 
 
 def _set_balancing_state(coordinator: EVLoadBalancerCoordinator) -> None:
@@ -110,9 +109,7 @@ def _setup_sensor_states(hass, l1: str = "15.0", l2: str = "15.0", l3: str = "15
 @pytest.mark.asyncio
 async def test_event_current_adjusted_fires_on_amp_change(hass, full_config_entry):
     """EVENT_CURRENT_ADJUSTED ska skickas vid strömsändning."""
-    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
-        mock_debouncer_cls.return_value = MagicMock()
-        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+    coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
 
     coordinator._dispatcher.send_amp = AsyncMock(return_value=True)
     coordinator._dispatcher.pause = AsyncMock(return_value=False)
@@ -156,9 +153,7 @@ async def test_event_current_adjusted_fires_on_amp_change(hass, full_config_entr
 @pytest.mark.asyncio
 async def test_event_current_adjusted_not_fired_when_dispatcher_fails(hass, full_config_entry):
     """EVENT_CURRENT_ADJUSTED ska INTE skickas om dispatcher returnerar False."""
-    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
-        mock_debouncer_cls.return_value = MagicMock()
-        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+    coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
 
     # Dispatcher returnerar False (misslyckad sändning)
     coordinator._dispatcher.send_amp = AsyncMock(return_value=False)
@@ -185,11 +180,9 @@ async def test_event_current_adjusted_not_fired_when_dispatcher_fails(hass, full
 
 
 @pytest.mark.asyncio
-async def test_event_device_paused_fires_on_pause(hass, full_config_entry):
+async def test_event_device_paused_fires_on_pause(hass, full_config_entry, freezer):
     """EVENT_DEVICE_PAUSED ska skickas när laddning pausas."""
-    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
-        mock_debouncer_cls.return_value = MagicMock()
-        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+    coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
 
     coordinator._dispatcher.send_amp = AsyncMock(return_value=True)
     coordinator._dispatcher.pause = AsyncMock(return_value=True)
@@ -207,15 +200,12 @@ async def test_event_device_paused_fires_on_pause(hass, full_config_entry):
 
     hass.bus.async_listen_once(EVENT_DEVICE_PAUSED, capture_event)
 
-    T0 = datetime(2025, 1, 1, 12, 0, 0)
+    T0 = dt_util.utcnow()
 
     # Sätt below_min_since 15s innan T0 så att timern är expired vid T0
-    with patch(
-        "custom_components.ev_load_balancer.sensor.utcnow",
-        return_value=T0,
-    ):
-        coordinator._hysteresis._below_min_since = T0 - timedelta(seconds=15)
-        await coordinator._async_calculate()
+    freezer.move_to(T0)
+    coordinator._hysteresis._below_min_since = T0 - timedelta(seconds=15)
+    await coordinator._async_calculate()
 
     await hass.async_block_till_done()
 
@@ -233,11 +223,11 @@ async def test_event_device_paused_fires_on_pause(hass, full_config_entry):
 
 
 @pytest.mark.asyncio
-async def test_event_device_paused_not_fired_when_dispatcher_fails(hass, full_config_entry):
+async def test_event_device_paused_not_fired_when_dispatcher_fails(
+    hass, full_config_entry, freezer
+):
     """EVENT_DEVICE_PAUSED ska INTE skickas om dispatcher returnerar False."""
-    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
-        mock_debouncer_cls.return_value = MagicMock()
-        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+    coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
 
     coordinator._dispatcher.send_amp = AsyncMock(return_value=False)
     coordinator._dispatcher.pause = AsyncMock(return_value=False)  # Misslyckad paus
@@ -246,15 +236,12 @@ async def test_event_device_paused_not_fired_when_dispatcher_fails(hass, full_co
     _set_balancing_state(coordinator)
     _setup_sensor_states(hass, l1="18.1", l2="18.1", l3="18.1")
 
-    T0 = datetime(2025, 1, 1, 12, 0, 0)
+    T0 = dt_util.utcnow()
 
     with patch.object(coordinator, "_fire_event", wraps=coordinator._fire_event) as mock_fire:
-        with patch(
-            "custom_components.ev_load_balancer.sensor.utcnow",
-            return_value=T0,
-        ):
-            coordinator._hysteresis._below_min_since = T0
-            await coordinator._async_calculate()
+        freezer.move_to(T0)
+        coordinator._hysteresis._below_min_since = T0
+        await coordinator._async_calculate()
 
     calls_for_paused = [c for c in mock_fire.call_args_list if c.args[0] == EVENT_DEVICE_PAUSED]
     assert len(calls_for_paused) == 0
@@ -266,11 +253,9 @@ async def test_event_device_paused_not_fired_when_dispatcher_fails(hass, full_co
 
 
 @pytest.mark.asyncio
-async def test_event_device_resumed_fires_on_resume(hass, full_config_entry):
+async def test_event_device_resumed_fires_on_resume(hass, full_config_entry, freezer):
     """EVENT_DEVICE_RESUMED ska skickas när laddning återupptas."""
-    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
-        mock_debouncer_cls.return_value = MagicMock()
-        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+    coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
 
     coordinator._dispatcher.send_amp = AsyncMock(return_value=True)
     coordinator._dispatcher.pause = AsyncMock(return_value=True)
@@ -295,15 +280,12 @@ async def test_event_device_resumed_fires_on_resume(hass, full_config_entry):
 
     hass.bus.async_listen_once(EVENT_DEVICE_RESUMED, capture_event)
 
-    T0 = datetime(2025, 1, 1, 12, 0, 0)
+    T0 = dt_util.utcnow()
 
     # Sätt above_resume_since 30s innan T0 så att timern är expired vid T0
-    with patch(
-        "custom_components.ev_load_balancer.sensor.utcnow",
-        return_value=T0,
-    ):
-        coordinator._hysteresis._above_resume_since = T0 - timedelta(seconds=30)
-        await coordinator._async_calculate()
+    freezer.move_to(T0)
+    coordinator._hysteresis._above_resume_since = T0 - timedelta(seconds=30)
+    await coordinator._async_calculate()
 
     await hass.async_block_till_done()
 
@@ -318,11 +300,11 @@ async def test_event_device_resumed_fires_on_resume(hass, full_config_entry):
 
 
 @pytest.mark.asyncio
-async def test_event_device_resumed_not_fired_when_dispatcher_fails(hass, full_config_entry):
+async def test_event_device_resumed_not_fired_when_dispatcher_fails(
+    hass, full_config_entry, freezer
+):
     """EVENT_DEVICE_RESUMED ska INTE skickas om dispatcher returnerar False."""
-    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
-        mock_debouncer_cls.return_value = MagicMock()
-        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+    coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
 
     coordinator._dispatcher.send_amp = AsyncMock(return_value=False)
     coordinator._dispatcher.pause = AsyncMock(return_value=False)
@@ -337,15 +319,12 @@ async def test_event_device_resumed_not_fired_when_dispatcher_fails(hass, full_c
 
     _setup_sensor_states(hass, l1="5.0", l2="5.0", l3="5.0")
 
-    T0 = datetime(2025, 1, 1, 12, 0, 0)
+    T0 = dt_util.utcnow()
 
     with patch.object(coordinator, "_fire_event", wraps=coordinator._fire_event) as mock_fire:
-        with patch(
-            "custom_components.ev_load_balancer.sensor.utcnow",
-            return_value=T0,
-        ):
-            coordinator._hysteresis._above_resume_since = T0
-            await coordinator._async_calculate()
+        freezer.move_to(T0)
+        coordinator._hysteresis._above_resume_since = T0
+        await coordinator._async_calculate()
 
     calls_for_resumed = [c for c in mock_fire.call_args_list if c.args[0] == EVENT_DEVICE_RESUMED]
     assert len(calls_for_resumed) == 0
@@ -359,9 +338,7 @@ async def test_event_device_resumed_not_fired_when_dispatcher_fails(hass, full_c
 @pytest.mark.asyncio
 async def test_capacity_warning_event_fires_on_transition_off_to_on(hass, full_config_entry):
     """EVENT_CAPACITY_WARNING ska skickas vid övergång off→on."""
-    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
-        mock_debouncer_cls.return_value = MagicMock()
-        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+    coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
 
     coordinator._dispatcher.send_amp = AsyncMock(return_value=True)
     coordinator._dispatcher.pause = AsyncMock(return_value=False)
@@ -396,9 +373,7 @@ async def test_capacity_warning_event_fires_on_transition_off_to_on(hass, full_c
 @pytest.mark.asyncio
 async def test_capacity_warning_event_not_fired_when_already_on(hass, full_config_entry):
     """EVENT_CAPACITY_WARNING ska INTE skickas igen om varning redan är aktiv."""
-    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
-        mock_debouncer_cls.return_value = MagicMock()
-        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+    coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
 
     coordinator._dispatcher.send_amp = AsyncMock(return_value=True)
     coordinator._dispatcher.pause = AsyncMock(return_value=False)
@@ -425,9 +400,7 @@ async def test_capacity_warning_re_fire_cycle(hass, full_config_entry):
     Cykeln: off→on (event active=True) → on→off (event active=False) → off→on (event active=True).
     Totalt 3 events skickas.
     """
-    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
-        mock_debouncer_cls.return_value = MagicMock()
-        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+    coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
 
     coordinator._dispatcher.send_amp = AsyncMock(return_value=True)
     coordinator._dispatcher.pause = AsyncMock(return_value=False)
@@ -598,9 +571,7 @@ async def test_t14_phase_switch_fires_phase_switched_event(hass, full_config_ent
     README lists from_mode, to_mode and reason; available_per_phase is the
     existing payload field of fire_phase_switched_event.
     """
-    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
-        mock_debouncer_cls.return_value = MagicMock()
-        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+    coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
     coordinator._dispatcher.send_amp = AsyncMock(return_value=True)
     coordinator._dispatcher.send_psm = AsyncMock(return_value=True)
     _set_balancing_state(coordinator)
@@ -633,9 +604,7 @@ async def test_t14_phase_switch_fires_phase_switched_event(hass, full_config_ent
 @pytest.mark.asyncio
 async def test_phase_switched_event_not_fired_when_psm_fails(hass, full_config_entry):
     """No phase_switched event when the psm command could not be sent."""
-    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
-        mock_debouncer_cls.return_value = MagicMock()
-        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+    coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
     coordinator._dispatcher.send_amp = AsyncMock(return_value=True)
     coordinator._dispatcher.send_psm = AsyncMock(return_value=False)
     _set_balancing_state(coordinator)
@@ -702,9 +671,7 @@ def test_fire_event_merges_data(full_config_entry):
 @pytest.mark.asyncio
 async def test_calculation_cycle_logged_at_debug(hass, full_config_entry, caplog):
     """Normal beräkningscykel ska loggas med DEBUG-nivå."""
-    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
-        mock_debouncer_cls.return_value = MagicMock()
-        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+    coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
 
     coordinator._dispatcher.send_amp = AsyncMock(return_value=True)
     coordinator._dispatcher.pause = AsyncMock(return_value=False)
@@ -730,9 +697,7 @@ async def test_calculation_cycle_logged_at_debug(hass, full_config_entry, caplog
 @pytest.mark.asyncio
 async def test_capacity_warning_logged_at_warning(hass, full_config_entry, caplog):
     """Kapacitetsvarning ska loggas med WARNING-nivå."""
-    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
-        mock_debouncer_cls.return_value = MagicMock()
-        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+    coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
 
     coordinator._dispatcher.send_amp = AsyncMock(return_value=True)
     coordinator._dispatcher.pause = AsyncMock(return_value=False)

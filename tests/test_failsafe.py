@@ -12,7 +12,7 @@ Täcker:
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -132,9 +132,7 @@ def safe_current_8a_entry():
 
 def _make_coordinator_in_balancing(hass, entry) -> EVLoadBalancerCoordinator:
     """Hjälpfunktion: skapa koordinator i BALANCING-tillstånd."""
-    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
-        mock_debouncer_cls.return_value = MagicMock()
-        coordinator = EVLoadBalancerCoordinator(hass, entry)
+    coordinator = EVLoadBalancerCoordinator(hass, entry)
 
     # Mocka dispatcher
     coordinator._dispatcher.send_amp = AsyncMock(return_value=True)
@@ -294,9 +292,7 @@ async def test_total_sensor_loss_pauses_even_with_pause_action(hass, pause_confi
 
 def test_charger_sensor_unavailable_uses_last_sent_amp(hass, full_config_entry):
     """Laddarens nrg-sensor unavailable → fallback till _last_sent_amp."""
-    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
-        mock_debouncer_cls.return_value = MagicMock()
-        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+    coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
 
     # Sätt last_sent_amp till 10A (simulerar aktiv laddning)
     coordinator._last_sent_amp = 10
@@ -316,9 +312,7 @@ def test_charger_sensor_unavailable_logs_warning(hass, full_config_entry, caplog
     """Laddarens nrg-sensor unavailable ska loggas med WARNING-nivå."""
     import logging
 
-    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
-        mock_debouncer_cls.return_value = MagicMock()
-        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+    coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
 
     coordinator._last_sent_amp = 8
     hass.states.async_set("sensor.goe_409787_nrg_4", "unavailable")
@@ -336,9 +330,7 @@ def test_charger_sensor_unavailable_logs_warning(hass, full_config_entry, caplog
 @pytest.mark.asyncio
 async def test_charger_sensor_unavailable_continues_calculation(hass, full_config_entry):
     """Laddarens sensor unavailable → beräkning fortsätter med fallback-värde (ej FAILSAFE)."""
-    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
-        mock_debouncer_cls.return_value = MagicMock()
-        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+    coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
 
     coordinator._dispatcher.send_amp = AsyncMock(return_value=True)
     coordinator._dispatcher.pause = AsyncMock(return_value=True)
@@ -382,18 +374,12 @@ async def test_ha_restart_starts_in_initializing(hass, full_config_entry):
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][full_config_entry.entry_id] = {}
 
-    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
-        mock_debouncer = MagicMock()
-        mock_debouncer.async_schedule_call = MagicMock()
-        mock_debouncer.async_cancel = MagicMock()
-        mock_debouncer_cls.return_value = mock_debouncer
+    added_entities = []
 
-        added_entities = []
+    def mock_add_entities(entities):
+        added_entities.extend(entities)
 
-        def mock_add_entities(entities):
-            added_entities.extend(entities)
-
-        await async_setup_entry(hass, full_config_entry, mock_add_entities)
+    await async_setup_entry(hass, full_config_entry, mock_add_entities)
 
     coordinator = hass.data[DOMAIN][full_config_entry.entry_id]["coordinator"]
     # Vid start ska state vara INITIALIZING
@@ -403,9 +389,7 @@ async def test_ha_restart_starts_in_initializing(hass, full_config_entry):
 @pytest.mark.asyncio
 async def test_ha_restart_stays_initializing_with_unavailable_sensors(hass, full_config_entry):
     """Vid HA-omstart med unavailable sensorer → stannar i INITIALIZING."""
-    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
-        mock_debouncer_cls.return_value = MagicMock()
-        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+    coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
 
     coordinator._dispatcher.send_amp = AsyncMock()
     coordinator._dispatcher.pause = AsyncMock()
@@ -428,9 +412,7 @@ async def test_ha_restart_stays_initializing_with_unavailable_sensors(hass, full
 @pytest.mark.asyncio
 async def test_ha_restart_normalizes_after_sensors_available(hass, full_config_entry):
     """Efter HA-omstart: sensorer tillgängliga → normalisering till IDLE."""
-    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
-        mock_debouncer_cls.return_value = MagicMock()
-        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+    coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
 
     coordinator._dispatcher.send_amp = AsyncMock(return_value=True)
     coordinator._dispatcher.pause = AsyncMock(return_value=True)
@@ -496,9 +478,7 @@ def test_safe_default_current_read_from_options(hass, full_config_entry):
         },
     )
 
-    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
-        mock_debouncer_cls.return_value = MagicMock()
-        coordinator = EVLoadBalancerCoordinator(hass, entry)
+    coordinator = EVLoadBalancerCoordinator(hass, entry)
 
     # Options ska ha prioritet
     assert coordinator._safe_default_current == 10
@@ -556,9 +536,7 @@ async def test_no_recovery_if_sensor_still_unavailable(hass, full_config_entry):
 @pytest.mark.asyncio
 async def test_recovery_from_idle_failsafe(hass, full_config_entry):
     """Återhämtning när föregående tillstånd var IDLE."""
-    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
-        mock_debouncer_cls.return_value = MagicMock()
-        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+    coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
 
     coordinator._dispatcher.send_amp = AsyncMock(return_value=True)
     coordinator._dispatcher.pause = AsyncMock(return_value=True)
@@ -638,9 +616,7 @@ async def test_sensor_unavailable_during_initializing_no_crash(hass, full_config
     enter_failsafe() kastar ValueError om anropas i INITIALIZING.
     _async_handle_sensor_unavailable ska returnera tidigt utan undantag.
     """
-    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
-        mock_debouncer_cls.return_value = MagicMock()
-        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+    coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
 
     # Mocka dispatcher
     coordinator._dispatcher.send_amp = AsyncMock(return_value=True)
