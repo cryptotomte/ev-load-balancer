@@ -107,7 +107,7 @@
         "sections": {
           "advanced": {
             "name": "Advanced settings",
-            "description": "The defaults suit an electricity meter that updates every 10 seconds. The measurement window must be longer than the meter's update interval plus the time it takes for the value to reach Home Assistant. A window that is too short brings back the oscillating charge current.",
+            "description": "The defaults suit an electricity meter that updates every 10 seconds. The measurement window must be longer than the meter's update interval plus the time it takes for the value to reach Home Assistant. A window that is too short makes the charge current oscillate.",
             "data": {
               "estimate_window_seconds": "Measurement window (s)",
               "up_hold_seconds": "Hold time before increase (s)"
