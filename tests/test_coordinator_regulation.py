@@ -13,6 +13,7 @@ import re
 from datetime import datetime, timedelta
 
 import pytest
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import CoreState, HomeAssistant, ServiceCall
 from homeassistant.util import dt as dt_util
@@ -248,6 +249,124 @@ async def test_shutdown_lets_calculation_in_flight_finish_without_rerun(hass, fr
     await rig.advance(1)
     assert sent == [15]
     assert coordinator.last_sent_amp == 15
+
+
+# ---------------------------------------------------------------------------
+# V-4: an exception inside a calculation
+# ---------------------------------------------------------------------------
+
+
+def _fail_first_calculation(coordinator: EVLoadBalancerCoordinator, release: asyncio.Event):
+    """The next calculation waits for ``release`` and raises; later ones run normally."""
+    calculate = coordinator._async_calculate
+    failed: list[bool] = []
+
+    async def failing_once() -> None:
+        if not failed:
+            failed.append(True)
+            await release.wait()
+            raise RuntimeError("calculation failed")
+        await calculate()
+
+    coordinator._async_calculate = failing_once
+    return failed
+
+
+async def test_v4_failing_calculation_keeps_pending_rerun(hass, freezer, caplog):
+    """V-4: a report arrives while a calculation is in flight, and that calculation raises.
+
+    The rerun the report asked for still runs and sends its reduction, and the
+    error is logged once, with its traceback.
+    """
+    rig = Rig(hass, freezer)
+    coordinator = await rig.start(phases=[20.5] * 3, charger=[15.5] * 3, amp="16")
+    release = asyncio.Event()
+    failed = _fail_first_calculation(coordinator, release)
+    try:
+        rig.report([20.5] * 3)
+        await rig.advance(0.5, settle=False)
+        assert failed
+        # h = 26.5 - 15.5 = 11 A → budget 12 A, while the failing calculation is in flight
+        rig.report([26.5] * 3)
+        await rig.advance(0.5, settle=False)
+        caplog.clear()
+
+        release.set()
+        await rig.advance(0.5)
+        assert rig.amps == [16, 12]
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert len(errors) == 1, [r.getMessage() for r in errors]
+        assert errors[0].exc_info is not None
+        assert isinstance(errors[0].exc_info[1], RuntimeError)
+    finally:
+        release.set()
+        await rig.stop()
+
+
+async def _set_up_entry(rig: Rig) -> EVLoadBalancerCoordinator:
+    """Set up the whole config entry (platforms included) on the rig's states."""
+    rig._mock_services()
+    hass = rig.hass
+    hass.states.async_set(CHARGER_ENTITIES["map"], "[1, 2, 3]")
+    hass.states.async_set(CHARGER_ENTITIES["amp"], "16")
+    rig.car("Charging")
+    rig.charger([15.5] * 3)
+    rig.report([20.5] * 3)
+    rig.entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(rig.entry.entry_id)
+    await rig.advance(1)
+    rig.report([20.5] * 3)
+    await rig.advance(1)
+    return hass.data[DOMAIN][rig.entry.entry_id]["coordinator"]
+
+
+async def test_v4_unload_after_calculation_that_raises_during_shutdown(hass, freezer):
+    """V-4 / Principle VI: the calculation in flight at unload raises.
+
+    The unload still unloads the platforms and succeeds.
+    """
+    rig = Rig(hass, freezer)
+    coordinator = await _set_up_entry(rig)
+    release = asyncio.Event()
+    failed = _fail_first_calculation(coordinator, release)
+    try:
+        rig.report([20.5] * 3)
+        await rig.advance(0.5, settle=False)
+        assert failed
+
+        unloading = hass.async_create_task(hass.config_entries.async_unload(rig.entry.entry_id))
+        await asyncio.sleep(0)
+        release.set()
+        assert await unloading is True
+        assert rig.entry.state is ConfigEntryState.NOT_LOADED
+    finally:
+        release.set()
+
+
+async def test_v4_unload_does_not_hang_on_calculation_that_never_ends(hass, freezer):
+    """V-4 / Principle VI: a calculation in flight that never returns.
+
+    The unload waits a bounded time, then unloads the platforms anyway.
+    """
+    rig = Rig(hass, freezer)
+    coordinator = await _set_up_entry(rig)
+    never = asyncio.Event()
+    failed = _fail_first_calculation(coordinator, never)
+    try:
+        rig.report([20.5] * 3)
+        await rig.advance(0.5, settle=False)
+        assert failed
+
+        unloading = hass.async_create_task(hass.config_entries.async_unload(rig.entry.entry_id))
+        await rig.advance(5, settle=False)
+        assert not unloading.done()
+        await rig.advance(6, settle=False)
+        assert unloading.done()
+        assert unloading.result() is True
+        assert rig.entry.state is ConfigEntryState.NOT_LOADED
+    finally:
+        never.set()
+        await hass.async_block_till_done()
 
 
 # ---------------------------------------------------------------------------

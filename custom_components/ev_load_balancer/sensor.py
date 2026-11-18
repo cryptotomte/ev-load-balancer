@@ -107,6 +107,9 @@ _CAR_IDLE_STATE = "Idle"
 # Laddarström per fas (A) under vilken laddaren räknas som stillastående (D-19)
 _CHARGER_IDLE_MAX_A = 0.5
 
+# Längsta väntan på en pågående beräkning vid avstängning (V-4)
+_SHUTDOWN_WAIT_SECONDS = 10.0
+
 # Fasläge i eventet phase_switched, samma form som charging_mode
 _MODE_LABELS = {PhaseMode.ONE_PHASE: "1-phase", PhaseMode.THREE_PHASE: "3-phase"}
 
@@ -572,7 +575,8 @@ class EVLoadBalancerCoordinator:
         """Avregistrera lyssnare och timrar; låt en pågående beräkning bli klar.
 
         Beräkningen avbryts inte mitt i: ett avbrutet resume kunde lämna frc='0'
-        utan strömkommando.
+        utan strömkommando. Väntan är begränsad (V-4) så att en beräkning som
+        hänger inte hindrar att plattformarna laddas ur (Princip VI).
         """
         self._shut_down = True
         self._cancel_scheduled_calculation()
@@ -580,7 +584,12 @@ class EVLoadBalancerCoordinator:
             remove_fn()
         self._remove_listeners.clear()
         if self._calc_task is not None and not self._calc_task.done():
-            await self._calc_task
+            _, pending = await asyncio.wait({self._calc_task}, timeout=_SHUTDOWN_WAIT_SECONDS)
+            if pending:
+                _LOGGER.warning(
+                    "Pågående beräkning inte klar efter %s s — avslutar utan att vänta",
+                    _SHUTDOWN_WAIT_SECONDS,
+                )
         self._notify_listeners.clear()
 
     @callback
@@ -641,7 +650,12 @@ class EVLoadBalancerCoordinator:
         try:
             while True:
                 self._calc_again = False
-                await self._async_calculate()
+                try:
+                    await self._async_calculate()
+                except Exception:
+                    # V-4: en väntande omräkning får inte tappas, och avstängningen
+                    # får inte avbrytas av felet.
+                    _LOGGER.exception("Oväntat fel i beräkningen")
                 if not self._calc_again or self._shut_down:
                     return
         finally:
