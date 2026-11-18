@@ -16,7 +16,12 @@ from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from homeassistant.util import dt as dt_util
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    async_fire_time_changed,
+    async_mock_service,
+)
 
 from custom_components.ev_load_balancer.calculator import CalculationResult
 from custom_components.ev_load_balancer.const import DOMAIN
@@ -988,6 +993,93 @@ async def test_upregulation_sends_amp_after_cooldown(hass, full_config_entry):
     ):
         await coordinator._async_calculate()
     coordinator._dispatcher.send_amp.assert_called_once_with(12)
+
+
+@pytest.mark.asyncio
+async def test_t10_charger_current_changes_send_no_command(hass, full_config_entry):
+    """T-10 / F-2: with the listeners set up, charger current changes alone send nothing.
+
+    A drop of the charger current with an unchanged phase value is what made the
+    old regulation reduce in a cascade.
+    """
+    amp_calls = async_mock_service(hass, "number", "set_value")
+    select_calls = async_mock_service(hass, "select", "select_option")
+    hass.states.async_set("sensor.current_l1", "20.5")
+    hass.states.async_set("sensor.current_l2", "20.5")
+    hass.states.async_set("sensor.current_l3", "20.5")
+    hass.states.async_set("sensor.goe_409787_map", "[1, 2, 3]")
+    hass.states.async_set("sensor.goe_409787_car_value", "Charging")
+    for sensor in ("nrg_4", "nrg_5", "nrg_6"):
+        hass.states.async_set(f"sensor.goe_409787_{sensor}", "15.5")
+
+    coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+    sm = coordinator._state_machine
+    sm.record_successful_calculation()
+    sm.record_successful_calculation()
+    sm.on_car_connected()
+    coordinator._last_sent_amp = 16
+    await coordinator.async_setup()
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=1))
+    await hass.async_block_till_done()
+    # h = 20.5 - 15.5 = 5 A per fas → budget 18 A → 16 A står kvar
+    assert amp_calls == []
+
+    for value in ("12.0", "9.0", "6.0", "5.5"):
+        for sensor in ("nrg_4", "nrg_5", "nrg_6"):
+            hass.states.async_set(f"sensor.goe_409787_{sensor}", value)
+        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=1))
+        await hass.async_block_till_done()
+
+    assert amp_calls == []
+    assert [c for c in select_calls if c.data["option"] != "0"] == []
+    await coordinator.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_t12_no_history_allows_reduction_but_not_increase(hass, full_config_entry):
+    """T-12: right after start a reduction is sent, an increase only after 15 s of history.
+
+    Hold time 0 s, so only the history coverage can block the increase.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN, data=dict(full_config_entry.data), options={"up_hold_seconds": 0}
+    )
+    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
+        mock_debouncer_cls.return_value = MagicMock()
+        coordinator = EVLoadBalancerCoordinator(hass, entry)
+    coordinator._dispatcher.send_amp = AsyncMock(return_value=True)
+    sm = coordinator._state_machine
+    sm.record_successful_calculation()
+    sm.record_successful_calculation()
+    sm.on_car_connected()
+    coordinator._last_sent_amp = 14
+    T0 = datetime(2025, 1, 1, 12, 0, 0)
+
+    for sensor in ("nrg_4", "nrg_5", "nrg_6"):
+        hass.states.async_set(f"sensor.goe_409787_{sensor}", "0.0")
+    hass.states.async_set("sensor.goe_409787_map", "[1, 2, 3]")
+    hass.states.async_set("sensor.goe_409787_car_value", "Charging")
+
+    async def report_at(seconds: float, load: str) -> None:
+        for sensor in ("sensor.current_l1", "sensor.current_l2", "sensor.current_l3"):
+            hass.states.async_set(sensor, load)
+        with patch(
+            "custom_components.ev_load_balancer.sensor.utcnow",
+            return_value=T0 + timedelta(seconds=seconds),
+        ):
+            await coordinator._async_calculate()
+
+    # 25 - 15 - 2 = 8 A < 14 A: sänkning direkt, utan historik
+    await report_at(0, "15.0")
+    coordinator._dispatcher.send_amp.assert_called_once_with(8)
+
+    # 25 - 11 - 2 = 12 A > 8 A: ingen höjning förrän historiken täcker 15 s
+    # (samma gräns som kommandot vid t=0, som också räknas som ändring, P-2)
+    await report_at(10, "11.0")
+    await report_at(14.9, "11.0")
+    assert coordinator._dispatcher.send_amp.call_count == 1
+    await report_at(15.1, "11.0")
+    coordinator._dispatcher.send_amp.assert_called_with(12)
 
 
 @pytest.mark.asyncio

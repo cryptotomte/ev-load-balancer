@@ -175,7 +175,19 @@ async def test_t16_advanced_section_collapsed_and_saved_flat(
     assert (await resp.json())["type"] == FlowResultType.CREATE_ENTRY
     assert mock_config_entry.options["estimate_window_seconds"] == 20
     assert mock_config_entry.options["up_hold_seconds"] == 120
-    assert "advanced" not in mock_config_entry.options
+    # F-6: the two K-9 keys are the only new options
+    assert set(mock_config_entry.options) == {
+        "phases",
+        "safety_margin",
+        "min_current",
+        "max_current",
+        "phase_count",
+        "action_on_sensor_loss",
+        "safe_default_current",
+        "capacity_warning_threshold",
+        "estimate_window_seconds",
+        "up_hold_seconds",
+    }
 
 
 @pytest.mark.parametrize(

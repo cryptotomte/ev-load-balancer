@@ -619,6 +619,15 @@ async def test_t14_phase_switch_fires_phase_switched_event(hass, full_config_ent
     assert "3→1" in data["reason"]
     assert data["available_per_phase"] == pytest.approx([1.0, 18.0, 8.0])
     assert data["entry_id"] == full_config_entry.entry_id
+    # F-6: no new event fields
+    assert set(data) == {
+        "entry_id",
+        "timestamp",
+        "from_mode",
+        "to_mode",
+        "reason",
+        "available_per_phase",
+    }
 
 
 @pytest.mark.asyncio
