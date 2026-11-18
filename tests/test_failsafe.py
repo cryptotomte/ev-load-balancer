@@ -384,6 +384,7 @@ async def test_ha_restart_starts_in_initializing(hass, full_config_entry):
     coordinator = hass.data[DOMAIN][full_config_entry.entry_id]["coordinator"]
     # Vid start ska state vara INITIALIZING
     assert coordinator.state == BalancerState.INITIALIZING
+    await coordinator.async_shutdown()
 
 
 @pytest.mark.asyncio
@@ -510,6 +511,7 @@ async def test_automatic_recovery_when_sensor_returns(hass, full_config_entry):
     # Ska ha återhämtat sig till BALANCING
     assert coordinator.state == BalancerState.BALANCING
     assert coordinator.pause_reason is None
+    await coordinator.async_shutdown()
 
 
 @pytest.mark.asyncio
@@ -560,6 +562,7 @@ async def test_recovery_from_idle_failsafe(hass, full_config_entry):
 
     # Ska ha återhämtat sig till IDLE (föregående tillstånd)
     assert coordinator.state == BalancerState.IDLE
+    await coordinator.async_shutdown()
 
 
 @pytest.mark.asyncio
@@ -602,6 +605,7 @@ async def test_recovery_logs_info(hass, full_config_entry, caplog):
         await coordinator._async_check_recovery()
 
     assert any("återhämtning" in record.message.lower() for record in caplog.records)
+    await coordinator.async_shutdown()
 
 
 # ---------------------------------------------------------------------------

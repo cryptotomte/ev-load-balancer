@@ -132,6 +132,7 @@ async def test_async_setup_entry_creates_7_sensors(hass, full_config_entry):
     assert len(added_entities) == 7
     # Verifiera att koordinatorn lagrades i hass.data
     assert "coordinator" in hass.data[DOMAIN][full_config_entry.entry_id]
+    await hass.data[DOMAIN][full_config_entry.entry_id]["coordinator"].async_shutdown()
 
 
 @pytest.mark.asyncio
@@ -158,6 +159,7 @@ async def test_sensors_have_correct_types(hass, full_config_entry):
     assert len(available_sensors) == 4
     assert len(target_sensors) == 1
     assert len(utilization_sensors) == 1
+    await hass.data[DOMAIN][full_config_entry.entry_id]["coordinator"].async_shutdown()
 
 
 # ---------------------------------------------------------------------------
@@ -1766,6 +1768,7 @@ async def test_coordinator_sends_psm_auto_on_setup(hass, full_config_entry):
 
     # Verifiera att send_psm anropades med PSM_VALUE_AUTO ('0')
     coordinator._dispatcher.send_psm.assert_called_once_with(PSM_VALUE_AUTO)
+    await coordinator.async_shutdown()
 
 
 # ---------------------------------------------------------------------------

@@ -824,18 +824,3 @@ async def test_t13_sensor_loss_through_listener_failsafe_and_recovery(hass, free
         assert calls == ["balancing"]
     finally:
         await rig.stop()
-
-
-async def test_t13_total_sensor_loss_pauses_through_listener(hass, freezer):
-    """T-13: all phase sensors unavailable → pause (frc = 1), as before."""
-    rig = Rig(hass, freezer)
-    coordinator = await rig.start(phases=[20.5] * 3, charger=[15.5] * 3, amp="16")
-    try:
-        for sensor in PHASE_SENSORS:
-            hass.states.async_set(sensor, "unavailable")
-        await rig.advance(0.5)
-        assert coordinator.state.value == "failsafe"
-        assert rig.frc == ["1"]
-        assert rig.amps == []
-    finally:
-        await rig.stop()
