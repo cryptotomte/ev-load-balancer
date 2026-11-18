@@ -113,7 +113,7 @@
               "up_hold_seconds": "Hold time before increase (s)"
             },
             "data_description": {
-              "estimate_window_seconds": "How far back the charger's current is compared with each phase value. Default 15 s, allowed 3–60 s.",
+              "estimate_window_seconds": "How far back the charger's current is compared with each phase value. Default 15 s, allowed 3–30 s.",
               "up_hold_seconds": "How long the household load must have stayed low before the charge current is raised. Default 90 s, allowed 0–600 s."
             }
           }
@@ -125,7 +125,7 @@
       "duplicate_phase_sensors": "The same sensor cannot be used for multiple phases. Each phase must have a unique current sensor.",
       "max_less_than_min": "Maximum charge current must be at least as large as minimum charge current.",
       "safe_current_out_of_range": "Safe default current must be between 6 and 16 A",
-      "estimate_window_out_of_range": "The measurement window must be between 3 and 60 seconds.",
+      "estimate_window_out_of_range": "The measurement window must be between 3 and 30 seconds.",
       "up_hold_out_of_range": "The hold time must be between 0 and 600 seconds."
     }
   },

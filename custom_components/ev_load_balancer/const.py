@@ -72,7 +72,7 @@ CONF_ESTIMATE_WINDOW_SECONDS = "estimate_window_seconds"
 DEFAULT_ESTIMATE_WINDOW_SECONDS = 15
 """Standardfönster: längre än ett fasvärde kan vara gammalt (D-2)."""
 
-ESTIMATE_WINDOW_RANGE = (3, 60)
+ESTIMATE_WINDOW_RANGE = (3, 30)
 """Tillåtet intervall för mätfönstret, sekunder (K-9)."""
 
 CONF_UP_HOLD_SECONDS = "up_hold_seconds"

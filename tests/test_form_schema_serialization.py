@@ -194,7 +194,7 @@ async def test_t16_advanced_section_collapsed_and_saved_flat(
     ("advanced", "error"),
     [
         ({"estimate_window_seconds": 2, "up_hold_seconds": 90}, "estimate_window_out_of_range"),
-        ({"estimate_window_seconds": 61, "up_hold_seconds": 90}, "estimate_window_out_of_range"),
+        ({"estimate_window_seconds": 31, "up_hold_seconds": 90}, "estimate_window_out_of_range"),
         ({"estimate_window_seconds": 15, "up_hold_seconds": -1}, "up_hold_out_of_range"),
         ({"estimate_window_seconds": 15, "up_hold_seconds": 601}, "up_hold_out_of_range"),
     ],
@@ -212,17 +212,21 @@ async def test_t19_out_of_range_shows_form_again(
     assert "up_hold_seconds" not in mock_config_entry.options
 
 
+@pytest.mark.parametrize(("window", "hold"), [(3, 600), (30, 0)])
 async def test_t19_range_limits_are_accepted(
-    hass: HomeAssistant, client, mock_config_entry
+    hass: HomeAssistant, client, mock_config_entry, window, hold
 ) -> None:
-    """T-19: the range limits themselves (3 and 60 s, 0 and 600 s) are allowed."""
+    """T-19: the range limits themselves (3 and 30 s, D-15; 0 and 600 s) are allowed."""
     step, _ = await _options_params_step(hass, client, mock_config_entry)
 
     resp = await client.post(
         step,
-        json={**VALID_PARAMS, "advanced": {"estimate_window_seconds": 3, "up_hold_seconds": 600}},
+        json={
+            **VALID_PARAMS,
+            "advanced": {"estimate_window_seconds": window, "up_hold_seconds": hold},
+        },
     )
 
     assert (await resp.json())["type"] == FlowResultType.CREATE_ENTRY
-    assert mock_config_entry.options["estimate_window_seconds"] == 3
-    assert mock_config_entry.options["up_hold_seconds"] == 600
+    assert mock_config_entry.options["estimate_window_seconds"] == window
+    assert mock_config_entry.options["up_hold_seconds"] == hold
