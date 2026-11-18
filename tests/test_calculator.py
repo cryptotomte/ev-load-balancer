@@ -1,5 +1,9 @@
 """Tester för beräkningsmotorn (calculator.py).
 
+Since spec 010 the household load per phase is an input (from LoadEstimator);
+here it is given as phase value minus charger current, i.e. both from the
+same instant, which is what the estimator yields with a steady charger.
+
 Täcker PRD §9 Scenario 1 (3-fas, 14A) och Scenario 2 (1-fas L2, 8A),
 map-fallback, klämning och edge cases.
 """
@@ -52,6 +56,7 @@ def test_scenario1_3phase_target_14a():
     result = calculate(
         phases=PHASES_3,
         phase_values=[18.3, 12.1, 15.7],
+        household_loads=[8.3, 2.1, 5.7],
         device_values=[10.0, 10.0, 10.0],
         active_phase_numbers=[1, 2, 3],
         safety_margin=2.0,
@@ -96,6 +101,7 @@ def test_scenario2_1phase_l2_target_8a():
     result = calculate(
         phases=PHASES_3_S2,
         phase_values=[0.0, 6.0, 0.0],
+        household_loads=[0.0, 6.0, 0.0],
         device_values=[0.0, 0.0, 0.0],
         active_phase_numbers=[2],
         safety_margin=2.0,
@@ -128,6 +134,7 @@ def test_map_unavailable_fallback_all_phases():
     result = calculate(
         phases=PHASES_3,
         phase_values=[10.0, 8.0, 12.0],
+        household_loads=[10.0, 8.0, 12.0],
         device_values=[0.0, 0.0, 0.0],
         active_phase_numbers=[],  # fallback: alla faser
         safety_margin=2.0,
@@ -151,6 +158,7 @@ def test_result_clamped_to_min_current():
     result = calculate(
         phases=PHASES_3,
         phase_values=[24.0, 24.0, 24.0],
+        household_loads=[24.0, 24.0, 24.0],
         device_values=[0.0, 0.0, 0.0],
         active_phase_numbers=[1, 2, 3],
         safety_margin=2.0,
@@ -173,6 +181,7 @@ def test_result_clamped_to_max_current():
     result = calculate(
         phases=PHASES_3,
         phase_values=[0.0, 0.0, 0.0],
+        household_loads=[0.0, 0.0, 0.0],
         device_values=[0.0, 0.0, 0.0],
         active_phase_numbers=[1, 2, 3],
         safety_margin=0.0,
@@ -194,6 +203,7 @@ def test_negative_phase_sensor_value():
     result = calculate(
         phases=[{"sensor": "s.l1", "max_ampere": 25, "label": "L1"}],
         phase_values=[-2.0],
+        household_loads=[-2.0],
         device_values=[0.0],
         active_phase_numbers=[1],
         safety_margin=2.0,
@@ -215,6 +225,7 @@ def test_all_phases_zero_load():
     result = calculate(
         phases=PHASES_3,
         phase_values=[0.0, 0.0, 0.0],
+        household_loads=[0.0, 0.0, 0.0],
         device_values=[0.0, 0.0, 0.0],
         active_phase_numbers=[1, 2, 3],
         safety_margin=2.0,
@@ -236,6 +247,7 @@ def test_active_phases_correctly_set_for_1phase():
     result = calculate(
         phases=PHASES_3,
         phase_values=[5.0, 5.0, 5.0],
+        household_loads=[5.0, 5.0, 5.0],
         device_values=[0.0, 0.0, 0.0],
         active_phase_numbers=[2],
         safety_margin=2.0,
@@ -252,6 +264,7 @@ def test_active_phases_correctly_set_for_3phase():
     result = calculate(
         phases=PHASES_3,
         phase_values=[5.0, 5.0, 5.0],
+        household_loads=[5.0, 5.0, 5.0],
         device_values=[0.0, 0.0, 0.0],
         active_phase_numbers=[1, 2, 3],
         safety_margin=2.0,
@@ -275,6 +288,7 @@ def test_map_phase2_only_uses_l2():
     result = calculate(
         phases=PHASES_3_S2,
         phase_values=[24.0, 6.0, 24.0],
+        household_loads=[24.0, 6.0, 24.0],
         device_values=[0.0, 0.0, 0.0],
         active_phase_numbers=[2],
         safety_margin=2.0,
@@ -300,6 +314,7 @@ def test_calculation_time_is_set():
     result = calculate(
         phases=PHASES_3,
         phase_values=[5.0, 5.0, 5.0],
+        household_loads=[5.0, 5.0, 5.0],
         device_values=[0.0, 0.0, 0.0],
         active_phase_numbers=[1, 2, 3],
         safety_margin=2.0,
@@ -330,6 +345,7 @@ def test_fuse_headroom_differs_from_charger_budget():
     result = calculate(
         phases=phases,
         phase_values=[17.5],
+        household_loads=[1.5],
         device_values=[16.0],
         active_phase_numbers=[1],
         safety_margin=2.0,
@@ -340,3 +356,25 @@ def test_fuse_headroom_differs_from_charger_budget():
     assert result.charger_budget_l1 == approx(21.5)
     assert result.fuse_headroom_l1 == approx(5.5)
     assert result.fuse_headroom_min == approx(5.5)
+
+
+def test_budget_uses_household_load_not_phase_minus_charger():
+    """Spec 010 K-1: the budget is max − household − margin, not max − (P − charger) − margin.
+
+    Measured moment 08:31:28 (spec 2.2): P L1 = 24.0 A taken at 15.5 A, charger
+    now 6.57 A. Old formula gave 5.6 A; with h = 8.5 A the budget is 14.5 A.
+    """
+    result = calculate(
+        phases=PHASES_3,
+        phase_values=[24.0, 20.0, 20.0],
+        household_loads=[8.5, 4.5, 4.5],
+        device_values=[6.57, 6.57, 6.57],
+        active_phase_numbers=[1, 2, 3],
+        safety_margin=2.0,
+        min_current=6,
+        max_current=16,
+    )
+
+    assert abs(result.charger_budget_l1 - 14.5) < 0.001
+    assert result.target_current == 14
+    assert abs(result.fuse_headroom_l1 - (25 - 24.0 - 2)) < 0.001

@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
+from datetime import datetime
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -34,7 +35,10 @@ from homeassistant.helpers import start as ha_start
 from homeassistant.helpers.debounce import Debouncer
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.event import async_track_state_change_event
+from homeassistant.helpers.event import (
+    async_track_state_change_event,
+    async_track_state_report_event,
+)
 from homeassistant.util.dt import utcnow
 
 from .calculator import CalculationResult, calculate
@@ -44,19 +48,23 @@ from .const import (
     CONF_ACTION_ON_SENSOR_LOSS,
     CONF_CAPACITY_WARNING_THRESHOLD,
     CONF_CHARGER_ENTITIES,
+    CONF_ESTIMATE_WINDOW_SECONDS,
     CONF_MAX_CURRENT,
     CONF_MIN_CURRENT,
     CONF_PHASES,
     CONF_PROFILE_ID,
     CONF_SAFE_DEFAULT_CURRENT,
     CONF_SAFETY_MARGIN,
+    CONF_UP_HOLD_SECONDS,
     COOLDOWN_SECONDS,
     DEFAULT_CAPACITY_WARNING_THRESHOLD,
+    DEFAULT_ESTIMATE_WINDOW_SECONDS,
     DEFAULT_MAX_CURRENT,
     DEFAULT_MIN_CURRENT,
     DEFAULT_SAFE_CURRENT,
     DEFAULT_SAFETY_MARGIN,
     DEFAULT_SENSOR_LOSS_ACTION,
+    DEFAULT_UP_HOLD_SECONDS,
     DOMAIN,
     EVENT_CAPACITY_WARNING,
     EVENT_CURRENT_ADJUSTED,
@@ -71,6 +79,7 @@ from .const import (
     PSM_VALUE_AUTO,
     RESUME_DELAY_SECONDS,
     RESUME_THRESHOLD_OFFSET,
+    SAMPLE_COALESCE_SECONDS,
     SENSOR_AVAILABLE_L1,
     SENSOR_AVAILABLE_L2,
     SENSOR_AVAILABLE_L3,
@@ -80,6 +89,7 @@ from .const import (
     SENSOR_UTILIZATION,
 )
 from .hysteresis import HysteresisAction, HysteresisController
+from .load_estimator import LoadEstimator
 from .phase_switcher import PhaseMode, PhaseSwitcher
 from .state_machine import BalancerState, LoadBalancerStateMachine
 
@@ -121,8 +131,8 @@ class EVLoadBalancerCoordinator:
 
     Ansvarig för:
     - Registrering av state change-lyssnare för bevakade HA-entiteter
-    - Event-driven beräkningscykel med cooldown (Debouncer)
-    - Omedelbar nedreglering utan cooldown (preview-beräkning)
+    - Beräkning per mätvärde från fassensorerna (spec 010 K-3, K-6)
+    - Skattning av hushållslast med LoadEstimator (spec 010 K-1)
     - Notifiering av registrerade sensorlyssnare efter beräkning
     - Tillståndsövergångar via LoadBalancerStateMachine
     """
@@ -165,6 +175,28 @@ class EVLoadBalancerCoordinator:
             )
         )
 
+        # Skattning av hushållslast (spec 010), options > data > standard
+        estimate_window = float(
+            opts.get(
+                CONF_ESTIMATE_WINDOW_SECONDS,
+                data.get(CONF_ESTIMATE_WINDOW_SECONDS, DEFAULT_ESTIMATE_WINDOW_SECONDS),
+            )
+        )
+        up_hold = float(
+            opts.get(CONF_UP_HOLD_SECONDS, data.get(CONF_UP_HOLD_SECONDS, DEFAULT_UP_HOLD_SECONDS))
+        )
+        self._estimator = LoadEstimator(len(self._phases), estimate_window, up_hold)
+        # Fassensorns last_reported vid senast behandlade rapport, per fas
+        self._processed_reports: list[datetime | None] = [None] * len(self._phases)
+        self._phase_sensor_ids = {
+            phase.get("sensor", "") for phase in self._phases if phase.get("sensor", "")
+        }
+        self._device_sensor_ids = {
+            self._charger_entities[key]
+            for key in ("nrg_4", "nrg_5", "nrg_6")
+            if self._charger_entities.get(key)
+        }
+
         # State machine och senaste beräkningsresultat
         self._state_machine = LoadBalancerStateMachine()
         self.last_result: CalculationResult | None = None
@@ -198,11 +230,12 @@ class EVLoadBalancerCoordinator:
         # Lyssnarlista för sensor-callbacks
         self._notify_listeners: list[Callable] = []
 
-        # Debouncer för uppåtreglering (trailing edge, 5s cooldown)
+        # Slår ihop fasrapporter inom SAMPLE_COALESCE_SECONDS till en beräkning
+        # (K-6). Cooldown för höjning ligger i hysteres-kontrollern.
         self._debouncer = Debouncer(
             hass,
             _LOGGER,
-            cooldown=COOLDOWN_SECONDS,
+            cooldown=SAMPLE_COALESCE_SECONDS,
             immediate=False,
             function=self._async_calculate,
         )
@@ -466,6 +499,19 @@ class EVLoadBalancerCoordinator:
             )
             self._remove_listeners.append(remove_fn)
 
+        # PRELIMINARY (spec 010 P-3): fassensorn antas skriva även oförändrade
+        # värden (state_reported). Gör den inte det uppdateras skattningen bara
+        # när värdet ändras, vilket fortfarande fungerar men ger färre entydiga
+        # mätvärden.
+        if self._phase_sensor_ids:
+            self._remove_listeners.append(
+                async_track_state_report_event(
+                    self.hass,
+                    list(self._phase_sensor_ids),
+                    self._handle_phase_report,
+                )
+            )
+
         # Kör initial beräkning direkt (schemalägger via debouncer)
         self._debouncer.async_schedule_call()
 
@@ -481,57 +527,38 @@ class EVLoadBalancerCoordinator:
     def _handle_state_change(self, event: Event) -> None:
         """Hanterar state change-event för bevakade entiteter.
 
-        Synkron callback (körs i event loop).
-
-        Logik:
-        - Kontrollera om en bevakad fassensor blivit unavailable → failsafe
-        - Kontrollera om alla fassensorer är tillgängliga igen → återhämtning
-        - Beräkna preview (snabb synkron förhandsberäkning)
-        - Om preview < current_target: nedreglering → avbryt debouncer + direkt task
-        - Annars: uppåtreglering → schemalägg via debouncer (cooldown 5s)
+        - Laddarens ström (nrg_4/5/6) uppdaterar bara historiken (K-3, F-2).
+        - Fassensor unavailable → failsafe; tillgänglig igen i FAILSAFE → återhämtning.
+        - Fassensorer, car_value, map och pha schemalägger en beräkning.
         """
-        # Hämta entitets-ID:n för ändrade sensorer
         entity_id = event.data.get("entity_id", "")
         new_state = event.data.get("new_state")
 
-        # Bygg lista med fas-sensor-ID:n
-        phase_sensor_ids = {
-            phase.get("sensor", "") for phase in self._phases if phase.get("sensor", "")
-        }
+        if entity_id in self._device_sensor_ids:
+            self._estimator.record_device(utcnow(), self._read_device_values_sync())
+            return
 
-        # Kontrollera om en fassensor ändrade status
-        if entity_id in phase_sensor_ids:
+        if entity_id in self._phase_sensor_ids:
             if new_state is not None and new_state.state == "unavailable":
-                # Fassensor blev unavailable — kontrollera om alla är borta eller bara en
                 self._debouncer.async_cancel()
                 self.hass.async_create_task(self._async_handle_sensor_unavailable())
                 return
 
             if new_state is not None and new_state.state not in ("unavailable", "unknown"):
-                # En fassensor blev tillgänglig igen — kontrollera om vi är i FAILSAFE
                 if self._state_machine.state == BalancerState.FAILSAFE:
                     self._debouncer.async_cancel()
                     self.hass.async_create_task(self._async_check_recovery())
                     return
 
-        # Normal logik: preview-beräkning för nedreglering/uppåtreglering
-        # Hoppa över om vi är i FAILSAFE (ingen normal beräkning under failsafe)
         if self._state_machine.state == BalancerState.FAILSAFE:
             return
 
-        preview = self._calculate_preview()
+        self._debouncer.async_schedule_call()
 
-        if preview is not None and preview < self._current_target:
-            # Nedreglering: avbryt cooldown och kör omedelbart (US3)
-            _LOGGER.debug(
-                "Nedreglering detekterad: preview=%sA < current_target=%sA — kör omedelbart",
-                preview,
-                self._current_target,
-            )
-            self._debouncer.async_cancel()
-            self.hass.async_create_task(self._async_calculate())
-        else:
-            # Uppåtreglering eller oförändrat: vänta på cooldown (US3)
+    @callback
+    def _handle_phase_report(self, event: Event) -> None:
+        """Fassensor skrev samma värde igen: ett nytt mätvärde (K-1, K-3)."""
+        if self._state_machine.state != BalancerState.FAILSAFE:
             self._debouncer.async_schedule_call()
 
     async def _async_handle_sensor_unavailable(self) -> None:
@@ -627,54 +654,6 @@ class EVLoadBalancerCoordinator:
         # Starta beräkningscykel för att återta normal drift
         self._debouncer.async_schedule_call()
 
-    def _calculate_preview(self) -> int | None:
-        """Snabb synkron förhandsberäkning baserat på aktuella HA-states.
-
-        Returnerar beräknat target_current, eller None om sensorer saknas.
-        Används för att avgöra om nedreglering behövs utan full async-beräkning.
-        """
-        if not self._phases:
-            return None
-
-        # Läs fassensorvärden synkront
-        phase_values: list[float] = []
-        for phase in self._phases:
-            sensor_id = phase.get("sensor", "")
-            if not sensor_id:
-                return None
-            state = self.hass.states.get(sensor_id)
-            if state is None or state.state in ("unavailable", "unknown"):
-                return None
-            try:
-                phase_values.append(float(state.state))
-            except (ValueError, TypeError):
-                return None
-
-        # Läs device-värden synkront (0.0 om saknas)
-        device_values = self._read_device_values_sync()
-
-        # Parsa map för aktiva faser
-        active_phase_numbers = self._read_active_phases_sync()
-
-        # Snabb beräkning
-        try:
-            result = calculate(
-                phases=self._phases,
-                phase_values=phase_values,
-                device_values=device_values,
-                active_phase_numbers=active_phase_numbers,
-                safety_margin=self._safety_margin,
-                min_current=self._min_current,
-                max_current=self._max_current,
-            )
-            return result.target_current
-        except (ValueError, TypeError, KeyError, IndexError) as err:
-            _LOGGER.debug(
-                "Preview-beräkning misslyckades: %s — faller tillbaka till debouncer",
-                err,
-            )
-            return None
-
     def _read_device_values_sync(self) -> list[float]:
         """Läs laddarens ström per fas synkront.
 
@@ -767,17 +746,14 @@ class EVLoadBalancerCoordinator:
     async def _async_calculate(self) -> None:
         """Asynkron beräkning — läser HA-state, kör calculator, skickar kommandon.
 
-        Flöde:
-        1. Om state är FAILSAFE: hoppa över beräkning (failsafe-logik hanteras separat).
-        2. Läser fassensorvärden — avbryter om unavailable/unknown (FR-002/C1).
-        3. Läser enhetsvärden (nrg_4/5/6) och aktiva faser (map).
-        4. Kör calculate() för att beräkna available_* och target_current.
-        5. Registrerar lyckad beräkning via state machine (INITIALIZING → IDLE efter 2 st).
-        6. Hanterar bilstatus för IDLE/BALANCING-övergångar (car_value).
-        7. I BALANCING eller PAUSED: utvärderar hysteres-kontrollern (PR-04) och
-           skickar kommandon via CommandDispatcher. Uppdaterar _last_sent_amp och
-           anropar record_amp_change() endast om dispatchen lyckades (bool True).
-        8. Notifierar alla registrerade sensorlyssnare.
+        Ordningen följer spec 010 avsnitt 6.2:
+        1. Nya fasrapporter (ändrad last_reported) uppdaterar skattningen (K-1).
+           Rapporttiden är beräkningens tid, högst SAMPLE_COALESCE_SECONDS senare.
+        2. Budget per fas och mål via calculate().
+        3. Fasväxlaren (med uppehållstiden i K-5).
+        4. Hysteres: sänkning direkt, höjning högst till taket i K-4, paus som förut.
+        5. Logg enligt K-7, sedan lyssnarna.
+        FAILSAFE och otillgängliga fassensorer avbryter beräkningen som förut.
         """
         if not self._phases:
             _LOGGER.warning("Inga fassensorer konfigurerade — beräkning avbryts")
@@ -789,8 +765,11 @@ class EVLoadBalancerCoordinator:
             _LOGGER.debug("Beräkning avbryts: systemet är i FAILSAFE-tillstånd")
             return
 
+        now = utcnow()
+
         # Läs fassensorvärden — kontrollera unavailable
         phase_values: list[float] = []
+        phase_reported: list[datetime] = []
         for phase in self._phases:
             sensor_id = phase.get("sensor", "")
             if not sensor_id:
@@ -812,6 +791,7 @@ class EVLoadBalancerCoordinator:
                 return
             try:
                 phase_values.append(float(state.state))
+                phase_reported.append(state.last_reported)
             except (ValueError, TypeError):
                 _LOGGER.warning(
                     "Fassensor '%s' har ogiltigt värde '%s' — beräkning avbryts",
@@ -822,8 +802,13 @@ class EVLoadBalancerCoordinator:
                 self._notify_all_listeners()
                 return
 
-        # Läs device-värden (laddarens uttag per fas)
         device_values = self._read_device_values_sync()
+        self._estimator.record_device(now, device_values)
+        for idx, reported in enumerate(phase_reported):
+            if reported != self._processed_reports[idx]:
+                self._processed_reports[idx] = reported
+                self._estimator.on_phase_report(now, idx, phase_values[idx])
+        estimates = self._estimator.estimates
 
         # Parsa map för aktiva faser
         active_phase_numbers = self._read_active_phases_sync()
@@ -833,6 +818,7 @@ class EVLoadBalancerCoordinator:
             result = calculate(
                 phases=self._phases,
                 phase_values=phase_values,
+                household_loads=[estimate.household for estimate in estimates],
                 device_values=device_values,
                 active_phase_numbers=active_phase_numbers,
                 safety_margin=self._safety_margin,
@@ -883,7 +869,7 @@ class EVLoadBalancerCoordinator:
             phase_cmd = self._phase_switcher.evaluate(
                 available_per_phase=result.available_per_phase,
                 min_current=self._min_current,
-                now=utcnow(),
+                now=now,
             )
             if phase_cmd is not None:
                 psm_value = (
@@ -905,7 +891,8 @@ class EVLoadBalancerCoordinator:
         current_sm_state = self._state_machine.state
         if current_sm_state in (BalancerState.BALANCING, BalancerState.PAUSED):
             is_paused = current_sm_state == BalancerState.PAUSED
-            now = utcnow()
+            n_phases = len(self._phases)
+            active_idx = [p - 1 for p in result.active_phases if 0 < p <= n_phases]
 
             cmd = self._hysteresis.evaluate(
                 available_min=result.available_min,
@@ -913,6 +900,7 @@ class EVLoadBalancerCoordinator:
                 last_sent_amp=self._last_sent_amp,
                 is_paused=is_paused,
                 now=now,
+                up_ceiling=self._up_ceiling(now, phase_values, device_values, active_idx),
             )
 
             if cmd.action == HysteresisAction.SET_AMP:
@@ -923,6 +911,7 @@ class EVLoadBalancerCoordinator:
                 if sent:
                     self._last_sent_amp = cmd.amp
                     self._hysteresis.record_amp_change(now)
+                    self._record_command(now, cmd.amp, device_values, active_idx)
                     _LOGGER.info(
                         "Ström %s: %sA → %sA (%s)",
                         direction,
@@ -971,6 +960,7 @@ class EVLoadBalancerCoordinator:
                     self._pause_reason = None
                     self._last_sent_amp = cmd.amp
                     self._hysteresis.record_amp_change(now)
+                    self._record_command(now, cmd.amp, device_values, active_idx)
                     _LOGGER.info(
                         "Laddning återupptagen: %sA (%s)",
                         cmd.amp,
@@ -996,6 +986,8 @@ class EVLoadBalancerCoordinator:
                     cmd.reason,
                 )
 
+        self._log_estimates(result)
+
         # VIKTIGT: kapacitetsvarning kontrolleras FÖRE _notify_all_listeners() för att
         # säkerställa att event skickas på HA:s eventbuss innan binary_sensor:s
         # state skrivs till HA via async_write_ha_state.
@@ -1003,6 +995,62 @@ class EVLoadBalancerCoordinator:
 
         # Notifiera alla sensorlyssnare om uppdatering
         self._notify_all_listeners()
+
+    def _up_ceiling(
+        self,
+        now: datetime,
+        phase_values: list[float],
+        device_values: list[float],
+        active_idx: list[int],
+    ) -> int:
+        """Högsta ström en höjning får gå till (spec 010 K-4).
+
+        Kräver att senaste mätvärdet på varje aktiv fas var entydigt (F-3), och
+        att värdet ryms med den högsta skattningen under hålltiden.
+        """
+        estimates = self._estimator.estimates
+        if not all(estimates[idx].tight for idx in active_idx):
+            return self._last_sent_amp
+        return calculate(
+            phases=self._phases,
+            phase_values=phase_values,
+            household_loads=self._estimator.peak(now),
+            device_values=device_values,
+            active_phase_numbers=[idx + 1 for idx in active_idx],
+            safety_margin=self._safety_margin,
+            min_current=self._min_current,
+            max_current=self._max_current,
+        ).target_current
+
+    def _record_command(
+        self, now: datetime, amp: int, device_values: list[float], active_idx: list[int]
+    ) -> None:
+        """Räkna ett skickat strömkommando som en ändring i fönstret (spec 010 6.1, P-2).
+
+        Gäller de aktiva faserna; övriga faser behåller sitt aktuella värde.
+        """
+        self._estimator.record_command(
+            now,
+            [float(amp) if idx in active_idx else value for idx, value in enumerate(device_values)],
+        )
+
+    def _log_estimates(self, result: CalculationResult) -> None:
+        """Logga skattningen per fas på DEBUG (spec 010 K-7)."""
+        budgets = [result.charger_budget_l1, result.charger_budget_l2, result.charger_budget_l3]
+        for idx, estimate in enumerate(self._estimator.estimates):
+            _LOGGER.debug(
+                "Skattning %s: P=%.2fA laddare_min=%.2fA laddare_max=%.2fA "
+                "låg=%.2fA hög=%.2fA h=%.2fA entydig=%s budget=%.2fA",
+                self._phases[idx].get("label", f"L{idx + 1}"),
+                estimate.reported,
+                estimate.device_min,
+                estimate.device_max,
+                estimate.low,
+                estimate.high,
+                estimate.household,
+                estimate.tight,
+                budgets[idx],
+            )
 
     def _detect_phev_and_update_capability(self, active_phase_numbers: list[int]) -> None:
         """Detektera PHEV och uppdatera fasväxlarens kapabilitet.

@@ -351,67 +351,60 @@ async def test_available_sensors_updated_after_calculation(hass, full_config_ent
 # ---------------------------------------------------------------------------
 
 
-def test_handle_state_change_downregulation_cancels_debouncer(hass, full_config_entry):
-    """Nedreglering ska avbryta debouncer och skapa en direkt task."""
+def _state_event(entity_id: str, new_state) -> MagicMock:
+    """Hjälpfunktion: state_changed-event med entity_id och new_state."""
+    event = MagicMock()
+    event.data = {"entity_id": entity_id, "new_state": new_state}
+    return event
+
+
+def test_charger_current_change_only_records_history(hass, full_config_entry):
+    """T-10 / F-2: a charger current change schedules no calculation and sends nothing.
+
+    It only adds a value to the estimator history (K-3).
+    """
     with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
         mock_debouncer = MagicMock()
         mock_debouncer_cls.return_value = mock_debouncer
         coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
 
-    # Sätt current_target högt (simulerar aktiv laddning)
-    coordinator._current_target = 14
-
-    # Sätt sensorvärden som ger lägre preview (<14)
-    hass.states.async_set("sensor.current_l1", "24.0")  # max 25 - 24 - 2 = -1 → kläms till 6
-    hass.states.async_set("sensor.current_l2", "24.0")
-    hass.states.async_set("sensor.current_l3", "24.0")
-    hass.states.async_set("sensor.goe_409787_nrg_4", "0.0")
-    hass.states.async_set("sensor.goe_409787_nrg_5", "0.0")
-    hass.states.async_set("sensor.goe_409787_nrg_6", "0.0")
-    hass.states.async_set("sensor.goe_409787_map", "[1, 2, 3]")
-
-    # Skapa mock event
-    mock_event = MagicMock()
-
+    hass.states.async_set("sensor.goe_409787_nrg_4", "6.5")
     with patch.object(hass, "async_create_task") as mock_create_task:
-        coordinator._handle_state_change(mock_event)
+        coordinator._handle_state_change(
+            _state_event("sensor.goe_409787_nrg_4", hass.states.get("sensor.goe_409787_nrg_4"))
+        )
 
-    # Nedreglering ska avbryta debouncer
-    mock_debouncer.async_cancel.assert_called_once()
-    # Och skapa en direkt task
-    mock_create_task.assert_called_once()
-
-
-def test_handle_state_change_upregulation_uses_debouncer(hass, full_config_entry):
-    """Uppåtreglering ska använda debouncer (cooldown)."""
-    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
-        mock_debouncer = MagicMock()
-        mock_debouncer_cls.return_value = mock_debouncer
-        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
-
-    # Sätt current_target lågt — preview blir högre
-    coordinator._current_target = 6
-
-    # Sätt sensorvärden som ger högt preview (>6)
-    hass.states.async_set("sensor.current_l1", "5.0")
-    hass.states.async_set("sensor.current_l2", "5.0")
-    hass.states.async_set("sensor.current_l3", "5.0")
-    hass.states.async_set("sensor.goe_409787_nrg_4", "0.0")
-    hass.states.async_set("sensor.goe_409787_nrg_5", "0.0")
-    hass.states.async_set("sensor.goe_409787_nrg_6", "0.0")
-    hass.states.async_set("sensor.goe_409787_map", "[1, 2, 3]")
-
-    mock_event = MagicMock()
-
-    with patch.object(hass, "async_create_task") as mock_create_task:
-        coordinator._handle_state_change(mock_event)
-
-    # Uppåtreglering: INGEN cancel av debouncer
+    mock_debouncer.async_schedule_call.assert_not_called()
     mock_debouncer.async_cancel.assert_not_called()
-    # Debouncer ska schemaläggas
-    mock_debouncer.async_schedule_call.assert_called()
-    # Ingen direkt task
     mock_create_task.assert_not_called()
+    assert coordinator._estimator._device[-1][1][0] == 6.5
+
+
+def test_phase_sensor_change_schedules_calculation(hass, full_config_entry):
+    """A changed phase value schedules one coalesced calculation (K-3, K-6)."""
+    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
+        mock_debouncer = MagicMock()
+        mock_debouncer_cls.return_value = mock_debouncer
+        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+
+    hass.states.async_set("sensor.current_l1", "24.0")
+    with patch.object(hass, "async_create_task") as mock_create_task:
+        coordinator._handle_state_change(
+            _state_event("sensor.current_l1", hass.states.get("sensor.current_l1"))
+        )
+
+    mock_debouncer.async_schedule_call.assert_called_once()
+    mock_debouncer.async_cancel.assert_not_called()
+    mock_create_task.assert_not_called()
+
+
+def test_phase_sensor_report_schedules_calculation(full_config_entry):
+    """An unchanged phase report (state_reported) is a sample too (K-1, P-3)."""
+    coordinator = _make_coordinator(full_config_entry)
+
+    coordinator._handle_phase_report(MagicMock())
+
+    coordinator._debouncer.async_schedule_call.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -915,40 +908,49 @@ async def test_no_command_in_idle_state(hass, full_config_entry):
 
 @pytest.mark.asyncio
 async def test_upregulation_sends_amp_after_cooldown(hass, full_config_entry):
-    """Uppreglering ska skicka amp-kommando efter 5s cooldown."""
+    """An increase is sent after the 5 s cooldown once the reports are unambiguous.
+
+    The estimator history must cover the 15 s window first (K-4, T-12), so the
+    first calculation is made 20 s before the cooldown starts.
+    """
     with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
         mock_debouncer_cls.return_value = MagicMock()
         coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
 
-    # Mocka dispatcher
     coordinator._dispatcher.send_amp = AsyncMock()
     coordinator._dispatcher.pause = AsyncMock()
     coordinator._dispatcher.resume = AsyncMock()
 
-    # Sätt state till BALANCING
     sm = coordinator._state_machine
     sm.record_successful_calculation()
     sm.record_successful_calculation()
     sm.on_car_connected()
 
-    # last_sent_amp = 8A, ny target = 12A (uppreglering)
     coordinator._last_sent_amp = 8
-
-    # Registrera en amp-ändring precis nu (sätter cooldown-timer)
     T0 = datetime(2025, 1, 1, 12, 0, 0)
-    coordinator._hysteresis.record_amp_change(T0)
 
-    # Sensorvärden: available = 25 - 11 - 2 = 12A → target = 12A (uppreglering)
-    hass.states.async_set("sensor.current_l1", "11.0")
-    hass.states.async_set("sensor.current_l2", "11.0")
-    hass.states.async_set("sensor.current_l3", "11.0")
+    def report() -> None:
+        # available = 25 - 11 - 2 = 12A → target = 12A; same value again is a new report
+        for sensor in ("sensor.current_l1", "sensor.current_l2", "sensor.current_l3"):
+            hass.states.async_set(sensor, "11.0")
+
     hass.states.async_set("sensor.goe_409787_nrg_4", "0.0")
     hass.states.async_set("sensor.goe_409787_nrg_5", "0.0")
     hass.states.async_set("sensor.goe_409787_nrg_6", "0.0")
     hass.states.async_set("sensor.goe_409787_map", "[1, 2, 3]")
     hass.states.async_set("sensor.goe_409787_car_value", "Charging")
+    report()
+    with patch(
+        "custom_components.ev_load_balancer.sensor.utcnow",
+        return_value=T0 - timedelta(seconds=20),
+    ):
+        await coordinator._async_calculate()
+    coordinator._dispatcher.send_amp.assert_not_called()
+
+    coordinator._hysteresis.record_amp_change(T0)
 
     # T=4.9s: cooldown ej expired → ingen uppreglering
+    report()
     with patch(
         "custom_components.ev_load_balancer.sensor.utcnow",
         return_value=T0 + timedelta(seconds=4.9),
@@ -957,6 +959,7 @@ async def test_upregulation_sends_amp_after_cooldown(hass, full_config_entry):
     coordinator._dispatcher.send_amp.assert_not_called()
 
     # T=5s: cooldown expired → uppreglering
+    report()
     with patch(
         "custom_components.ev_load_balancer.sensor.utcnow",
         return_value=T0 + timedelta(seconds=5),
@@ -984,7 +987,6 @@ async def test_no_command_if_less_than_cooldown_since_last_change(hass, full_con
     coordinator._last_sent_amp = 8
 
     T0 = datetime(2025, 1, 1, 12, 0, 0)
-    coordinator._hysteresis.record_amp_change(T0)
 
     # Sensorvärden: target = 12A (uppreglering)
     hass.states.async_set("sensor.current_l1", "11.0")
@@ -995,6 +997,16 @@ async def test_no_command_if_less_than_cooldown_since_last_change(hass, full_con
     hass.states.async_set("sensor.goe_409787_nrg_6", "0.0")
     hass.states.async_set("sensor.goe_409787_map", "[1, 2, 3]")
     hass.states.async_set("sensor.goe_409787_car_value", "Charging")
+
+    # History covering the 15 s window, so only the cooldown can block (K-4).
+    with patch(
+        "custom_components.ev_load_balancer.sensor.utcnow",
+        return_value=T0 - timedelta(seconds=20),
+    ):
+        await coordinator._async_calculate()
+    coordinator._hysteresis.record_amp_change(T0)
+    for sensor in ("sensor.current_l1", "sensor.current_l2", "sensor.current_l3"):
+        hass.states.async_set(sensor, "11.0")
 
     # T=2s: cooldown ej expired
     with patch(
