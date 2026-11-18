@@ -128,11 +128,12 @@ async def test_async_setup_entry_creates_7_sensors(hass, full_config_entry):
         added_entities.extend(entities)
 
     await async_setup_entry(hass, full_config_entry, mock_add_entities)
-
-    assert len(added_entities) == 7
-    # Verifiera att koordinatorn lagrades i hass.data
-    assert "coordinator" in hass.data[DOMAIN][full_config_entry.entry_id]
-    await hass.data[DOMAIN][full_config_entry.entry_id]["coordinator"].async_shutdown()
+    try:
+        assert len(added_entities) == 7
+        # Verifiera att koordinatorn lagrades i hass.data
+        assert "coordinator" in hass.data[DOMAIN][full_config_entry.entry_id]
+    finally:
+        await hass.data[DOMAIN][full_config_entry.entry_id]["coordinator"].async_shutdown()
 
 
 @pytest.mark.asyncio
@@ -148,18 +149,19 @@ async def test_sensors_have_correct_types(hass, full_config_entry):
         added_entities.extend(entities)
 
     await async_setup_entry(hass, full_config_entry, mock_add_entities)
+    try:
+        # Kontrollera typer: 1 status, 4 available (l1/l2/l3/min), 1 target, 1 utilization
+        status_sensors = [e for e in added_entities if isinstance(e, BalancerStatusSensor)]
+        available_sensors = [e for e in added_entities if isinstance(e, AvailableCurrentSensor)]
+        target_sensors = [e for e in added_entities if isinstance(e, TargetCurrentSensor)]
+        utilization_sensors = [e for e in added_entities if isinstance(e, UtilizationSensor)]
 
-    # Kontrollera typer: 1 status, 4 available (l1/l2/l3/min), 1 target, 1 utilization
-    status_sensors = [e for e in added_entities if isinstance(e, BalancerStatusSensor)]
-    available_sensors = [e for e in added_entities if isinstance(e, AvailableCurrentSensor)]
-    target_sensors = [e for e in added_entities if isinstance(e, TargetCurrentSensor)]
-    utilization_sensors = [e for e in added_entities if isinstance(e, UtilizationSensor)]
-
-    assert len(status_sensors) == 1
-    assert len(available_sensors) == 4
-    assert len(target_sensors) == 1
-    assert len(utilization_sensors) == 1
-    await hass.data[DOMAIN][full_config_entry.entry_id]["coordinator"].async_shutdown()
+        assert len(status_sensors) == 1
+        assert len(available_sensors) == 4
+        assert len(target_sensors) == 1
+        assert len(utilization_sensors) == 1
+    finally:
+        await hass.data[DOMAIN][full_config_entry.entry_id]["coordinator"].async_shutdown()
 
 
 # ---------------------------------------------------------------------------
@@ -1765,10 +1767,11 @@ async def test_coordinator_sends_psm_auto_on_setup(hass, full_config_entry):
     coordinator._dispatcher.send_psm = AsyncMock(return_value=True)
 
     await coordinator.async_setup()
-
-    # Verifiera att send_psm anropades med PSM_VALUE_AUTO ('0')
-    coordinator._dispatcher.send_psm.assert_called_once_with(PSM_VALUE_AUTO)
-    await coordinator.async_shutdown()
+    try:
+        # Verifiera att send_psm anropades med PSM_VALUE_AUTO ('0')
+        coordinator._dispatcher.send_psm.assert_called_once_with(PSM_VALUE_AUTO)
+    finally:
+        await coordinator.async_shutdown()
 
 
 # ---------------------------------------------------------------------------

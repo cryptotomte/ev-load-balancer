@@ -310,6 +310,7 @@ INCREASE_AFTER_LOAD_GONE = [
         id="changes_only",
         marks=pytest.mark.xfail(
             strict=True,
+            raises=AssertionError,
             reason="spec 010 D-18: the clock may not make an estimate unambiguous (D-12); "
             "with a changes-only meter an unchanged phase never gets a new sample",
         ),

@@ -382,9 +382,11 @@ async def test_ha_restart_starts_in_initializing(hass, full_config_entry):
     await async_setup_entry(hass, full_config_entry, mock_add_entities)
 
     coordinator = hass.data[DOMAIN][full_config_entry.entry_id]["coordinator"]
-    # Vid start ska state vara INITIALIZING
-    assert coordinator.state == BalancerState.INITIALIZING
-    await coordinator.async_shutdown()
+    try:
+        # Vid start ska state vara INITIALIZING
+        assert coordinator.state == BalancerState.INITIALIZING
+    finally:
+        await coordinator.async_shutdown()
 
 
 @pytest.mark.asyncio
@@ -494,24 +496,25 @@ def test_safe_default_current_read_from_options(hass, full_config_entry):
 async def test_automatic_recovery_when_sensor_returns(hass, full_config_entry):
     """När sensor återkommer → recover_from_failsafe() → föregående tillstånd."""
     coordinator = _make_coordinator_in_balancing(hass, full_config_entry)
+    try:
+        # Trigga failsafe
+        hass.states.async_set("sensor.current_l1", "unavailable")
+        hass.states.async_set("sensor.current_l2", "12.0")
+        hass.states.async_set("sensor.current_l3", "12.0")
+        await coordinator._async_handle_sensor_unavailable()
+        assert coordinator.state == BalancerState.FAILSAFE
+        assert coordinator._state_machine.previous_state == BalancerState.BALANCING
 
-    # Trigga failsafe
-    hass.states.async_set("sensor.current_l1", "unavailable")
-    hass.states.async_set("sensor.current_l2", "12.0")
-    hass.states.async_set("sensor.current_l3", "12.0")
-    await coordinator._async_handle_sensor_unavailable()
-    assert coordinator.state == BalancerState.FAILSAFE
-    assert coordinator._state_machine.previous_state == BalancerState.BALANCING
+        # Sensor återkommer
+        hass.states.async_set("sensor.current_l1", "10.0")
 
-    # Sensor återkommer
-    hass.states.async_set("sensor.current_l1", "10.0")
+        await coordinator._async_check_recovery()
 
-    await coordinator._async_check_recovery()
-
-    # Ska ha återhämtat sig till BALANCING
-    assert coordinator.state == BalancerState.BALANCING
-    assert coordinator.pause_reason is None
-    await coordinator.async_shutdown()
+        # Ska ha återhämtat sig till BALANCING
+        assert coordinator.state == BalancerState.BALANCING
+        assert coordinator.pause_reason is None
+    finally:
+        await coordinator.async_shutdown()
 
 
 @pytest.mark.asyncio
@@ -539,30 +542,31 @@ async def test_no_recovery_if_sensor_still_unavailable(hass, full_config_entry):
 async def test_recovery_from_idle_failsafe(hass, full_config_entry):
     """Återhämtning när föregående tillstånd var IDLE."""
     coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+    try:
+        coordinator._dispatcher.send_amp = AsyncMock(return_value=True)
+        coordinator._dispatcher.pause = AsyncMock(return_value=True)
 
-    coordinator._dispatcher.send_amp = AsyncMock(return_value=True)
-    coordinator._dispatcher.pause = AsyncMock(return_value=True)
+        # Sätt state till IDLE
+        sm = coordinator._state_machine
+        sm.record_successful_calculation()
+        sm.record_successful_calculation()
+        assert coordinator.state == BalancerState.IDLE
 
-    # Sätt state till IDLE
-    sm = coordinator._state_machine
-    sm.record_successful_calculation()
-    sm.record_successful_calculation()
-    assert coordinator.state == BalancerState.IDLE
+        # Trigga failsafe från IDLE
+        hass.states.async_set("sensor.current_l1", "unavailable")
+        hass.states.async_set("sensor.current_l2", "12.0")
+        hass.states.async_set("sensor.current_l3", "12.0")
+        await coordinator._async_handle_sensor_unavailable()
+        assert coordinator.state == BalancerState.FAILSAFE
 
-    # Trigga failsafe från IDLE
-    hass.states.async_set("sensor.current_l1", "unavailable")
-    hass.states.async_set("sensor.current_l2", "12.0")
-    hass.states.async_set("sensor.current_l3", "12.0")
-    await coordinator._async_handle_sensor_unavailable()
-    assert coordinator.state == BalancerState.FAILSAFE
+        # Sensor återkommer
+        hass.states.async_set("sensor.current_l1", "10.0")
+        await coordinator._async_check_recovery()
 
-    # Sensor återkommer
-    hass.states.async_set("sensor.current_l1", "10.0")
-    await coordinator._async_check_recovery()
-
-    # Ska ha återhämtat sig till IDLE (föregående tillstånd)
-    assert coordinator.state == BalancerState.IDLE
-    await coordinator.async_shutdown()
+        # Ska ha återhämtat sig till IDLE (föregående tillstånd)
+        assert coordinator.state == BalancerState.IDLE
+    finally:
+        await coordinator.async_shutdown()
 
 
 @pytest.mark.asyncio
@@ -593,19 +597,20 @@ async def test_recovery_logs_info(hass, full_config_entry, caplog):
     import logging
 
     coordinator = _make_coordinator_in_balancing(hass, full_config_entry)
+    try:
+        hass.states.async_set("sensor.current_l1", "unavailable")
+        hass.states.async_set("sensor.current_l2", "12.0")
+        hass.states.async_set("sensor.current_l3", "12.0")
+        await coordinator._async_handle_sensor_unavailable()
 
-    hass.states.async_set("sensor.current_l1", "unavailable")
-    hass.states.async_set("sensor.current_l2", "12.0")
-    hass.states.async_set("sensor.current_l3", "12.0")
-    await coordinator._async_handle_sensor_unavailable()
+        hass.states.async_set("sensor.current_l1", "10.0")
 
-    hass.states.async_set("sensor.current_l1", "10.0")
+        with caplog.at_level(logging.INFO, logger="custom_components.ev_load_balancer.sensor"):
+            await coordinator._async_check_recovery()
 
-    with caplog.at_level(logging.INFO, logger="custom_components.ev_load_balancer.sensor"):
-        await coordinator._async_check_recovery()
-
-    assert any("återhämtning" in record.message.lower() for record in caplog.records)
-    await coordinator.async_shutdown()
+        assert any("återhämtning" in record.message.lower() for record in caplog.records)
+    finally:
+        await coordinator.async_shutdown()
 
 
 # ---------------------------------------------------------------------------

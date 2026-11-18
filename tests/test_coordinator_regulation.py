@@ -219,6 +219,52 @@ async def test_r2_report_during_slow_command_is_not_dropped(hass, freezer):
         await rig.stop()
 
 
+async def test_v8_late_report_is_counted_at_its_report_time(hass, freezer):
+    """V-8 / D-11: a report processed late, behind a slow calculation, counts at last_reported.
+
+    The charger draws 10.5 A and h = 12 A (target 11 A). A report proving h = 13 A
+    reduces to 10 A, and that command waits for the charger. Meanwhile a report
+    proving h = 14 A arrives, and after it the charger's current rises to 15.5 A.
+    Counted at its report time, the window holds only 10.5 A and the 10 A command:
+    h = 14 A and the reduction to 9 A follows. Counted when it is processed, the
+    window would also hold the later 15.5 A, only h >= 9 A would be proven, and no
+    reduction would be sent.
+    """
+    rig = Rig(hass, freezer)
+    # h = 22.5 - 10.5 = 12 A → budget 11 A = the first command
+    coordinator = await rig.start(phases=[22.5] * 3, charger=[10.5] * 3, amp="11")
+    assert rig.amps == [11]
+    release = asyncio.Event()
+    sent: list[int] = []
+
+    async def slow_send_amp(amp: int) -> bool:
+        sent.append(amp)
+        if len(sent) == 1:
+            await release.wait()
+        return True
+
+    coordinator._dispatcher.send_amp = slow_send_amp
+    try:
+        # h = 23.5 - 10.5 = 13 A → budget 10 A
+        rig.report([23.5] * 3)
+        await rig.advance(0.5, settle=False)
+        assert sent == [10]
+
+        # h = 24.5 - 10.5 = 14 A → budget 9 A, while the first command is in flight
+        rig.report([24.5] * 3)
+        await rig.advance(0.3, settle=False)
+        rig.charger([15.5] * 3)
+        await rig.advance(0.5, settle=False)
+        assert sent == [10]
+
+        release.set()
+        await rig.advance(0.1)
+        assert sent == [10, 9]
+    finally:
+        release.set()
+        await rig.stop()
+
+
 async def test_shutdown_lets_calculation_in_flight_finish_without_rerun(hass, freezer):
     """13.3: shutdown waits for the calculation in flight and starts no new one,
 
@@ -235,20 +281,24 @@ async def test_shutdown_lets_calculation_in_flight_finish_without_rerun(hass, fr
         return True
 
     coordinator._dispatcher.send_amp = slow_send_amp
-    rig.report([23.5] * 3)
-    await rig.advance(0.5, settle=False)
-    rig.report([26.5] * 3)
-    await rig.advance(0.5, settle=False)
-    assert sent == [15]
+    try:
+        rig.report([23.5] * 3)
+        await rig.advance(0.5, settle=False)
+        rig.report([26.5] * 3)
+        await rig.advance(0.5, settle=False)
+        assert sent == [15]
 
-    stopping = hass.async_create_task(rig.stop())
-    await asyncio.sleep(0)
-    assert not stopping.done()
-    release.set()
-    await stopping
-    await rig.advance(1)
-    assert sent == [15]
-    assert coordinator.last_sent_amp == 15
+        stopping = hass.async_create_task(rig.stop())
+        await asyncio.sleep(0)
+        assert not stopping.done()
+        release.set()
+        await stopping
+        await rig.advance(1)
+        assert sent == [15]
+        assert coordinator.last_sent_amp == 15
+    finally:
+        release.set()
+        await rig.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -444,10 +494,12 @@ async def test_clock_and_coalescing_end_on_unload(hass, freezer):
     """D-12 / 13.3: after shutdown no clock, no pending calculation, no command."""
     rig = Rig(hass, freezer)
     coordinator = await rig.start(phases=[20.5] * 3, charger=[15.5] * 3, amp="16")
-    rig.report([34.5] * 3)
-    await hass.async_block_till_done()
-    assert coordinator._calc_timer is not None
-    await rig.stop()
+    try:
+        rig.report([34.5] * 3)
+        await hass.async_block_till_done()
+        assert coordinator._calc_timer is not None
+    finally:
+        await rig.stop()
 
     assert coordinator._calc_timer is None
     assert coordinator._remove_listeners == []
@@ -503,6 +555,28 @@ async def test_reconnect_after_disconnect_parks_at_min_then_starts_at_once(hass,
         # h = 5 A → budget 18 A → 16 A
         assert rig.amps == [16, 6, 16]
         assert rig.frc == []
+    finally:
+        await rig.stop()
+
+
+async def test_v8_plug_in_value_is_capped_by_hold_time_ceiling(hass, freezer):
+    """V-8 / A-9: L1 household 14 A for 20 s while no car is connected, then 5 A.
+
+    The car is plugged in 20 s later: the target is 16 A, but 14 A is within the
+    90 s hold time, so the plug-in value is 25 - 14 - 2 = 9 A.
+    """
+    rig = Rig(hass, freezer)
+    await rig.start(
+        phases=[14.0, 5.0, 5.0], charger=[0.0] * 3, amp="6", car="Idle", balancing=False
+    )
+    try:
+        await _report_every_5s(rig, [14.0, 5.0, 5.0], 20)
+        await _report_every_5s(rig, [5.0, 5.0, 5.0], 20)
+        assert rig.coordinator.state.value == "idle"
+        assert rig.amps == []
+        rig.car("Charging")
+        await hass.async_block_till_done()
+        assert rig.amps == [9]
     finally:
         await rig.stop()
 
