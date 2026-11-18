@@ -610,3 +610,41 @@ async def test_r11_stored_settings_fall_back_or_are_clamped(
         assert len(warnings) == expected, [r.getMessage() for r in warnings]
     finally:
         await rig.stop()
+
+
+# ---------------------------------------------------------------------------
+# Warnings on transition (13.3)
+# ---------------------------------------------------------------------------
+
+
+async def test_unavailable_sensor_warns_on_transition_only(hass, freezer, caplog):
+    """13.3: an unavailable charger sensor or an unknown phase sensor gives one WARNING
+
+    when it goes away, not one per report or clock tick; a new one after it came back.
+    """
+    rig = Rig(hass, freezer)
+    await rig.start(phases=[20.5] * 3, charger=[15.5] * 3, amp="16")
+
+    def warnings(entity_id: str) -> int:
+        return sum(
+            1
+            for r in caplog.records
+            if r.levelname == "WARNING" and f"'{entity_id}'" in r.getMessage()
+        )
+
+    try:
+        hass.states.async_set(CHARGER_CURRENT_SENSORS[0], "unavailable")
+        await _report_every_5s(rig, [20.5] * 3, 30)
+        assert warnings(CHARGER_CURRENT_SENSORS[0]) == 1
+
+        rig.charger([15.5] * 3)
+        await _report_every_5s(rig, [20.5] * 3, 10)
+        hass.states.async_set(CHARGER_CURRENT_SENSORS[0], "unavailable")
+        await _report_every_5s(rig, [20.5] * 3, 10)
+        assert warnings(CHARGER_CURRENT_SENSORS[0]) == 2
+
+        hass.states.async_set(PHASE_SENSORS[2], "unknown")
+        await rig.advance(30)
+        assert warnings(PHASE_SENSORS[2]) == 1
+    finally:
+        await rig.stop()

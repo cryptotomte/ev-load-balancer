@@ -245,6 +245,9 @@ class EVLoadBalancerCoordinator:
         # Kapacitetsvarnings-state (för transition-detektion)
         self._last_capacity_warning: bool = False
 
+        # Sensorer som redan fått en varning om att de är otillgängliga
+        self._unavailable_logged: set[str] = set()
+
         # Cleanup-callbacks (registrerade lyssnare)
         self._remove_listeners: list[Callable] = []
 
@@ -795,6 +798,16 @@ class EVLoadBalancerCoordinator:
             PSM_VALUE_3PHASE: PhaseMode.THREE_PHASE,
         }.get(state.state)
 
+    def _log_unavailable(self, entity_id: str, message: str, *args: Any) -> None:
+        """WARNING när sensorn blir otillgänglig, sedan DEBUG tills den är tillbaka.
+
+        Med klockan (D-12) och varje rapport skulle samma varning annars upprepas
+        var femte sekund (13.3).
+        """
+        level = logging.DEBUG if entity_id in self._unavailable_logged else logging.WARNING
+        self._unavailable_logged.add(entity_id)
+        _LOGGER.log(level, message, *args)
+
     def _read_charger_amp(self) -> int:
         """Laddarens inställda ström enligt amp-entiteten (D-10).
 
@@ -839,6 +852,7 @@ class EVLoadBalancerCoordinator:
                     try:
                         device_values.append(float(state.state))
                         substitute[-1] = False
+                        self._unavailable_logged.discard(entity_id)
                         continue
                     except (ValueError, TypeError):
                         _LOGGER.debug(
@@ -848,7 +862,8 @@ class EVLoadBalancerCoordinator:
                         )
                 elif state and state.state in ("unavailable", "unknown"):
                     # Laddarens sensor unavailable — fallback till senast satta amp-värde
-                    _LOGGER.warning(
+                    self._log_unavailable(
+                        entity_id,
                         "Laddarens sensor '%s' är %s — använder senast satt ström %sA som fallback",
                         entity_id,
                         state.state,
@@ -949,7 +964,8 @@ class EVLoadBalancerCoordinator:
                 return
             state = self.hass.states.get(sensor_id)
             if state is None or state.state in ("unavailable", "unknown"):
-                _LOGGER.warning(
+                self._log_unavailable(
+                    sensor_id,
                     "Fassensor '%s' är %s — beräkning räknas ej som lyckad (FR-002/C1)",
                     sensor_id,
                     state.state if state else "saknas",
@@ -962,6 +978,7 @@ class EVLoadBalancerCoordinator:
             try:
                 phase_values.append(float(state.state))
                 phase_reported.append(state.last_reported)
+                self._unavailable_logged.discard(sensor_id)
             except (ValueError, TypeError):
                 _LOGGER.warning(
                     "Fassensor '%s' har ogiltigt värde '%s' — beräkning avbryts",
