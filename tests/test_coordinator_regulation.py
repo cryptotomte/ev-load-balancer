@@ -21,7 +21,7 @@ from pytest_homeassistant_custom_component.common import (
     async_fire_time_changed_exact,
 )
 
-from custom_components.ev_load_balancer.const import DOMAIN
+from custom_components.ev_load_balancer.const import CLOCK_RECALC_SECONDS, DOMAIN
 from custom_components.ev_load_balancer.sensor import EVLoadBalancerCoordinator
 
 PHASE_SENSORS = ["sensor.rig_grid_l1", "sensor.rig_grid_l2", "sensor.rig_grid_l3"]
@@ -298,6 +298,25 @@ async def test_clock_is_not_a_sample(hass, freezer):
         rig.report([14.5] * 3)
         await rig.advance(0.5)
         assert rig.amps == [10, 16]
+    finally:
+        await rig.stop()
+
+
+async def test_v5_clock_leaves_initializing_without_sensor_events(hass, freezer):
+    """V-5 / D-21: a meter that writes only changed values, steady after setup.
+
+    Setup makes one calculation; no phase sensor event follows. The clock makes
+    the second, the coordinator leaves INITIALIZING, and the R-1 reduction
+    (charger at 16 A, target 10 A) is sent within one clock interval.
+    """
+    rig = Rig(hass, freezer)
+    # h = 28.5 - 15.5 = 13 A → budget 10 A
+    coordinator = await rig.start(phases=[28.5] * 3, charger=[15.5] * 3, amp="16", balancing=False)
+    try:
+        assert coordinator.state.value == "initializing"
+        await rig.advance(CLOCK_RECALC_SECONDS + 0.5)
+        assert coordinator.state.value == "balancing"
+        assert rig.amps == [10]
     finally:
         await rig.stop()
 

@@ -599,9 +599,14 @@ class EVLoadBalancerCoordinator:
         Paus, återstart, uppväxling, uppehållstid och hålltid prövas bara i en
         beräkning, och fassensorn skriver inte oförändrade värden (P-3 falskt).
         Omräkningen behandlar ingen rapport, så den är inget mätvärde och gör
-        ingen skattning entydig.
+        ingen skattning entydig. Den går även i INITIALIZING (D-21), annars
+        lämnas det läget inte förrän ett fasvärde ändras.
         """
-        if self._state_machine.state in (BalancerState.BALANCING, BalancerState.PAUSED):
+        if self._state_machine.state in (
+            BalancerState.INITIALIZING,
+            BalancerState.BALANCING,
+            BalancerState.PAUSED,
+        ):
             self._schedule_calculation()
 
     @callback
