@@ -98,6 +98,9 @@ _LOGGER = logging.getLogger(__name__)
 # Bilstatus som indikerar att bil INTE är ansluten
 _CAR_IDLE_STATE = "Idle"
 
+# Fasläge i eventet phase_switched, samma form som charging_mode
+_MODE_LABELS = {PhaseMode.ONE_PHASE: "1-phase", PhaseMode.THREE_PHASE: "3-phase"}
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -879,12 +882,17 @@ class EVLoadBalancerCoordinator:
                 )
                 psm_sent = await self._dispatcher.send_psm(psm_value)
                 if psm_sent:
-                    self._phase_switcher.record_mode_change(phase_cmd.target_mode)
-                    _LOGGER.info(
-                        "Fasväxling: %s (psm='%s') — %s",
-                        phase_cmd.action,
-                        psm_value,
-                        phase_cmd.reason,
+                    from_mode = self._phase_switcher.current_mode
+                    self._phase_switcher.record_mode_change(phase_cmd.target_mode, now)
+                    self.fire_phase_switched_event(
+                        from_mode=_MODE_LABELS[from_mode],
+                        to_mode=_MODE_LABELS[phase_cmd.target_mode],
+                        reason=phase_cmd.reason,
+                        available_per_phase=[
+                            result.charger_budget_l1,
+                            result.charger_budget_l2,
+                            result.charger_budget_l3,
+                        ],
                     )
 
         # Hantera kapacitetsbrist/reglering via hysteres (PR-04)

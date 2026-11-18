@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from custom_components.ev_load_balancer.const import PHASE_SWITCH_MIN_DWELL
 from custom_components.ev_load_balancer.phase_switcher import (
     PhaseMode,
     PhaseSwitchCommand,
@@ -41,6 +42,9 @@ ALL_PHASES_LOW = {"l1": 2.0, "l2": 3.0, "l3": 2.0}
 L3_LOW_L2_OK = {"l1": 10.0, "l2": 10.0, "l3": 2.0}
 
 T0 = datetime(2025, 1, 1, 12, 0, 0)
+
+# A switch long enough ago that the dwell time (K-5) no longer applies at T0
+PREVIOUS_SWITCH = T0 - timedelta(seconds=PHASE_SWITCH_MIN_DWELL)
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +159,7 @@ def test_upscale_1to3_after_60s_all_phases_ok():
     """Uppväxling 1→3: alla faser >= min_current i 60s → switch_to_3phase."""
     switcher = PhaseSwitcher(min_current=MIN_CURRENT)
     # Sätt läge till ONE_PHASE
-    switcher.record_mode_change(PhaseMode.ONE_PHASE)
+    switcher.record_mode_change(PhaseMode.ONE_PHASE, PREVIOUS_SWITCH)
 
     # T=0s: alla faser ok, timer startar — ingen uppväxling ännu
     cmd0 = switcher.evaluate(ALL_PHASES_OK, MIN_CURRENT, T0)
@@ -175,7 +179,7 @@ def test_upscale_1to3_after_60s_all_phases_ok():
 def test_upscale_reason_mentions_hysteresis():
     """PhaseSwitchCommand.reason ska nämna hysteres vid uppväxling."""
     switcher = PhaseSwitcher(min_current=MIN_CURRENT)
-    switcher.record_mode_change(PhaseMode.ONE_PHASE)
+    switcher.record_mode_change(PhaseMode.ONE_PHASE, PREVIOUS_SWITCH)
 
     switcher.evaluate(ALL_PHASES_OK, MIN_CURRENT, T0)  # starta timer
     cmd = switcher.evaluate(ALL_PHASES_OK, MIN_CURRENT, T0 + timedelta(seconds=60))
@@ -203,7 +207,7 @@ def test_no_upscale_in_3phase_mode():
 def test_upscale_timer_resets_when_phase_drops_below_min():
     """Hysteres-timer nollställs om kapacitet sjunker under min_current före 60s."""
     switcher = PhaseSwitcher(min_current=MIN_CURRENT)
-    switcher.record_mode_change(PhaseMode.ONE_PHASE)
+    switcher.record_mode_change(PhaseMode.ONE_PHASE, PREVIOUS_SWITCH)
 
     # T=0s: alla faser ok, timer startar
     switcher.evaluate(ALL_PHASES_OK, MIN_CURRENT, T0)
@@ -225,7 +229,7 @@ def test_upscale_timer_resets_when_phase_drops_below_min():
 def test_upscale_timer_requires_full_60s_after_reset():
     """Uppväxling kräver 60s sammanhängande tid efter timer-nollställning."""
     switcher = PhaseSwitcher(min_current=MIN_CURRENT)
-    switcher.record_mode_change(PhaseMode.ONE_PHASE)
+    switcher.record_mode_change(PhaseMode.ONE_PHASE, PREVIOUS_SWITCH)
 
     # Starta timer vid T=0
     switcher.evaluate(ALL_PHASES_OK, MIN_CURRENT, T0)
@@ -265,7 +269,7 @@ def test_phev_guard_returns_none_when_supports_3phase_false():
 def test_phev_guard_blocks_upscale_too():
     """device_supports_3phase=False → ingen uppväxling heller."""
     switcher = PhaseSwitcher(min_current=MIN_CURRENT)
-    switcher.record_mode_change(PhaseMode.ONE_PHASE)
+    switcher.record_mode_change(PhaseMode.ONE_PHASE, PREVIOUS_SWITCH)
     switcher.set_device_capability(supports_3phase=False)
 
     # Alla faser OK länge → ingen uppväxling pga PHEV-skydd
@@ -300,23 +304,23 @@ def test_record_mode_change_updates_current_mode():
     switcher = PhaseSwitcher(min_current=MIN_CURRENT)
     assert switcher.current_mode == PhaseMode.THREE_PHASE
 
-    switcher.record_mode_change(PhaseMode.ONE_PHASE)
+    switcher.record_mode_change(PhaseMode.ONE_PHASE, PREVIOUS_SWITCH)
     assert switcher.current_mode == PhaseMode.ONE_PHASE
 
-    switcher.record_mode_change(PhaseMode.THREE_PHASE)
+    switcher.record_mode_change(PhaseMode.THREE_PHASE, PREVIOUS_SWITCH)
     assert switcher.current_mode == PhaseMode.THREE_PHASE
 
 
 def test_record_mode_change_resets_timer():
     """record_mode_change() ska nollställa hysteres-timern."""
     switcher = PhaseSwitcher(min_current=MIN_CURRENT)
-    switcher.record_mode_change(PhaseMode.ONE_PHASE)
+    switcher.record_mode_change(PhaseMode.ONE_PHASE, PREVIOUS_SWITCH)
 
     # Starta timer
     switcher.evaluate(ALL_PHASES_OK, MIN_CURRENT, T0)
 
     # record_mode_change ska nollställa timern
-    switcher.record_mode_change(PhaseMode.ONE_PHASE)
+    switcher.record_mode_change(PhaseMode.ONE_PHASE, PREVIOUS_SWITCH)
 
     # Timer nollställd → ny timer startar nu
     switcher.evaluate(ALL_PHASES_OK, MIN_CURRENT, T0 + timedelta(seconds=50))
@@ -377,3 +381,42 @@ def test_phase_switcher_set_initial_mode_empty_list_gives_three_phase():
     switcher = PhaseSwitcher(min_current=MIN_CURRENT)
     switcher.set_initial_mode([])
     assert switcher.current_mode == PhaseMode.THREE_PHASE
+
+
+# ---------------------------------------------------------------------------
+# Spec 010 K-5: minimum dwell between phase switches (F-4)
+# ---------------------------------------------------------------------------
+
+
+def test_no_upswitch_within_dwell_after_downswitch():
+    """After a 3→1 switch no 1→3 switch for 300 s, even with all phases OK."""
+    switcher = PhaseSwitcher(min_current=MIN_CURRENT)
+    switcher.record_mode_change(PhaseMode.ONE_PHASE, T0)
+
+    for second in range(0, PHASE_SWITCH_MIN_DWELL, 10):
+        assert switcher.evaluate(ALL_PHASES_OK, MIN_CURRENT, T0 + timedelta(seconds=second)) is None
+
+    dwell_end = T0 + timedelta(seconds=PHASE_SWITCH_MIN_DWELL)
+    assert switcher.evaluate(ALL_PHASES_OK, MIN_CURRENT, dwell_end) is None
+    cmd = switcher.evaluate(ALL_PHASES_OK, MIN_CURRENT, dwell_end + timedelta(seconds=60))
+    assert cmd is not None
+    assert cmd.action == "switch_to_3phase"
+
+
+def test_no_downswitch_within_dwell_after_upswitch():
+    """After a 1→3 switch a shortage on L1 gives no 3→1 switch for 300 s."""
+    switcher = PhaseSwitcher(min_current=MIN_CURRENT)
+    switcher.record_mode_change(PhaseMode.THREE_PHASE, T0)
+
+    assert switcher.evaluate(L1_LOW_L2_OK, MIN_CURRENT, T0 + timedelta(seconds=3)) is None
+    assert (
+        switcher.evaluate(
+            L1_LOW_L2_OK, MIN_CURRENT, T0 + timedelta(seconds=PHASE_SWITCH_MIN_DWELL - 1)
+        )
+        is None
+    )
+    cmd = switcher.evaluate(
+        L1_LOW_L2_OK, MIN_CURRENT, T0 + timedelta(seconds=PHASE_SWITCH_MIN_DWELL)
+    )
+    assert cmd is not None
+    assert cmd.action == "switch_to_1phase"

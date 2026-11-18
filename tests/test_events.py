@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.common import MockConfigEntry, async_capture_events
 
 from custom_components.ev_load_balancer.const import (
     DOMAIN,
@@ -589,6 +589,54 @@ def test_event_phase_switched_logged_at_info(full_config_entry, caplog):
         )
 
     assert any("Fasväxling" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_t14_phase_switch_fires_phase_switched_event(hass, full_config_entry):
+    """T-14 / K-7: a sent phase switch fires phase_switched with the README fields.
+
+    README lists from_mode, to_mode and reason; available_per_phase is the
+    existing payload field of fire_phase_switched_event.
+    """
+    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
+        mock_debouncer_cls.return_value = MagicMock()
+        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+    coordinator._dispatcher.send_amp = AsyncMock(return_value=True)
+    coordinator._dispatcher.send_psm = AsyncMock(return_value=True)
+    _set_balancing_state(coordinator)
+    events = async_capture_events(hass, EVENT_PHASE_SWITCHED)
+
+    # L1: 25 - 22 - 2 = 1 A < 6 A, L2: 18 A → 3→1
+    _setup_sensor_states(hass, l1="22.0", l2="5.0", l3="15.0")
+    await coordinator._async_calculate()
+    await hass.async_block_till_done()
+
+    coordinator._dispatcher.send_psm.assert_called_once_with("1")
+    assert len(events) == 1
+    data = events[0].data
+    assert data["from_mode"] == "3-phase"
+    assert data["to_mode"] == "1-phase"
+    assert "3→1" in data["reason"]
+    assert data["available_per_phase"] == pytest.approx([1.0, 18.0, 8.0])
+    assert data["entry_id"] == full_config_entry.entry_id
+
+
+@pytest.mark.asyncio
+async def test_phase_switched_event_not_fired_when_psm_fails(hass, full_config_entry):
+    """No phase_switched event when the psm command could not be sent."""
+    with patch("custom_components.ev_load_balancer.sensor.Debouncer") as mock_debouncer_cls:
+        mock_debouncer_cls.return_value = MagicMock()
+        coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
+    coordinator._dispatcher.send_amp = AsyncMock(return_value=True)
+    coordinator._dispatcher.send_psm = AsyncMock(return_value=False)
+    _set_balancing_state(coordinator)
+    events = async_capture_events(hass, EVENT_PHASE_SWITCHED)
+
+    _setup_sensor_states(hass, l1="22.0", l2="5.0", l3="15.0")
+    await coordinator._async_calculate()
+    await hass.async_block_till_done()
+
+    assert events == []
 
 
 # ---------------------------------------------------------------------------

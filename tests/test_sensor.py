@@ -1391,7 +1391,8 @@ async def test_phase_upscale_sends_psm_after_60s(hass, full_config_entry):
     # Sätt fasväxlaren till ONE_PHASE-läge (simulerar att vi nyss växlat till 1-fas)
     from custom_components.ev_load_balancer.phase_switcher import PhaseMode
 
-    coordinator._phase_switcher.record_mode_change(PhaseMode.ONE_PHASE)
+    T0 = datetime(2025, 1, 1, 12, 0, 0)
+    coordinator._phase_switcher.record_mode_change(PhaseMode.ONE_PHASE, T0 - timedelta(seconds=300))
 
     sm = coordinator._state_machine
     sm.record_successful_calculation()
@@ -1412,8 +1413,6 @@ async def test_phase_upscale_sends_psm_after_60s(hass, full_config_entry):
     # (eftersom phase_switcher.current_mode == ONE_PHASE, ej THREE_PHASE)
     hass.states.async_set("sensor.goe_409787_map", "[2]")
     hass.states.async_set("sensor.goe_409787_car_value", "Charging")
-
-    T0 = datetime(2025, 1, 1, 12, 0, 0)
 
     # T=0s: timer startar → ingen uppväxling
     with patch("custom_components.ev_load_balancer.sensor.utcnow", return_value=T0):
@@ -1488,7 +1487,7 @@ async def test_phase_mode_attribute_in_status_sensor(hass, full_config_entry):
     # Sätt one_phase
     from custom_components.ev_load_balancer.phase_switcher import PhaseMode
 
-    coordinator._phase_switcher.record_mode_change(PhaseMode.ONE_PHASE)
+    coordinator._phase_switcher.record_mode_change(PhaseMode.ONE_PHASE, datetime(2025, 1, 1))
     attrs = sensor.extra_state_attributes
     assert attrs["phase_mode"] == "one_phase"
 
