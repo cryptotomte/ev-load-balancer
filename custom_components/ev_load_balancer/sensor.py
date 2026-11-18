@@ -203,7 +203,6 @@ class EVLoadBalancerCoordinator:
         # State machine och senaste beräkningsresultat
         self._state_machine = LoadBalancerStateMachine()
         self.last_result: CalculationResult | None = None
-        self._current_target: int = self._min_current
         self._pause_reason: str | None = None
 
         # Senast bekräftad laddström (används av hysteres-kontrollern)
@@ -841,9 +840,7 @@ class EVLoadBalancerCoordinator:
             result.charging_mode,
         )
 
-        # Uppdatera senaste resultat och current target
         self.last_result = result
-        self._current_target = result.target_current
 
         # Registrera lyckad beräkning (alla sensorer tillgängliga)
         prev_state = self._state_machine.state
