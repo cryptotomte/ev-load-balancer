@@ -197,6 +197,9 @@ class ClosedLoop:
         self._select_calls = async_mock_service(self.hass, "select", "select_option")
         self.hass.states.async_set(CHARGER_ENTITIES["map"], "[1, 2, 3]")
         self.hass.states.async_set(CHARGER_ENTITIES["amp"], str(self.charger.amp))
+        self.hass.states.async_set(
+            CHARGER_ENTITIES["psm"], "2" if self.charger.three_phase else "1"
+        )
         # The meter has a value from before the run started.
         for sensor, value in zip(PHASE_SENSORS, self._total()):
             self.hass.states.async_set(sensor, f"{value:.2f}")
@@ -210,12 +213,12 @@ class ClosedLoop:
         state_machine.on_car_connected()
         await self.coordinator.async_setup()
         await self.hass.async_block_till_done(wait_background_tasks=True)
-        if not self.charger.three_phase:
-            # The 1-phase mode was set long enough ago for the dwell time (K-5) to be over.
-            self.coordinator._phase_switcher.record_mode_change(
-                PhaseMode.ONE_PHASE,
-                dt_util.utcnow() - timedelta(seconds=PHASE_SWITCH_MIN_DWELL),
-            )
+        # The phase mode was set long enough ago for the dwell time (K-5) to be over;
+        # a coordinator set up while charging (D-13) would otherwise wait 300 s.
+        self.coordinator._phase_switcher.record_mode_change(
+            PhaseMode.THREE_PHASE if self.charger.three_phase else PhaseMode.ONE_PHASE,
+            dt_util.utcnow() - timedelta(seconds=PHASE_SWITCH_MIN_DWELL),
+        )
         self._apply_commands()
 
     async def run_until(self, end: float) -> Trace:

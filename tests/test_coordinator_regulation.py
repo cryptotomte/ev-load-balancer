@@ -341,3 +341,58 @@ async def test_r7_failsafe_reduce_then_recovery_raises_only_through_k4(hass, fre
         assert rig.amps == [6]
     finally:
         await rig.stop()
+
+
+# ---------------------------------------------------------------------------
+# D-13 / R-4: setup or reload while a car is charging
+# ---------------------------------------------------------------------------
+
+
+async def _report_every_5s(rig: Rig, values: list[float], seconds: float) -> None:
+    for _ in range(round(seconds / 5)):
+        rig.report(values)
+        await rig.advance(5)
+
+
+async def test_reload_while_charging_keeps_psm_and_arms_dwell(hass, freezer):
+    """R-4 / D-13: no psm at setup while charging; the mode comes from the psm entity
+
+    (forced 1-phase here) and no phase switch follows within 300 s of the setup,
+    although an up-switch is wanted all the time.
+    """
+    rig = Rig(hass, freezer)
+    # 1-phase on L1 at 15.5 A; household 5 A per phase → room for 3-phase 16 A
+    coordinator = await rig.start(
+        phases=[20.5, 5.0, 5.0], charger=[15.5, 0.0, 0.0], amp="16", psm="1"
+    )
+    try:
+        assert rig.psm == []
+        assert coordinator.phase_switcher_mode == "one_phase"
+
+        await _report_every_5s(rig, [20.5, 5.0, 5.0], 295)
+        assert rig.psm == []
+
+        await _report_every_5s(rig, [20.5, 5.0, 5.0], 75)
+        assert rig.psm == ["2"]
+    finally:
+        await rig.stop()
+
+
+async def test_unknown_car_status_at_setup_sends_no_psm(hass, freezer):
+    """D-13 / A-10: car status that cannot be read counts as charging; psm is not touched."""
+    rig = Rig(hass, freezer)
+    await rig.start(phases=[20.5] * 3, charger=[15.5] * 3, amp="16", car="unknown", balancing=False)
+    try:
+        assert rig.psm == []
+    finally:
+        await rig.stop()
+
+
+async def test_setup_without_car_sends_psm_auto(hass, freezer):
+    """D-13: with no car connected psm = auto is sent at setup, as before."""
+    rig = Rig(hass, freezer)
+    await rig.start(phases=[5.0] * 3, charger=[0.0] * 3, amp="6", car="Idle", balancing=False)
+    try:
+        assert rig.psm == ["0"]
+    finally:
+        await rig.stop()

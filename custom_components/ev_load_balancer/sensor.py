@@ -470,6 +470,20 @@ class EVLoadBalancerCoordinator:
         # Skjut upp PSM auto + initial fasläge till efter att HA är fullt uppstartat.
         # select.select_option-tjänsten är ej tillgänglig under setup (timing-issue).
         async def _init_after_ha_start(_hass: HomeAssistant) -> None:
+            if not self._car_known_idle():
+                # D-13 (R-4): psm mitt i ett pass avbryter laddningen och nollställde
+                # uppehållstiden. Okänd bilstatus räknas som laddande (A-10).
+                psm_mode = self._read_psm_mode()
+                if psm_mode is None:
+                    self._phase_switcher.set_initial_mode(self._read_active_phases_sync())
+                    psm_mode = self._phase_switcher.current_mode
+                self._phase_switcher.record_mode_change(psm_mode, utcnow())
+                _LOGGER.info(
+                    "Bil ansluten vid start: psm rörs inte, fasläge %s, "
+                    "ingen fasväxling förrän uppehållstiden gått",
+                    psm_mode,
+                )
+                return
             psm_sent = await self._dispatcher.send_psm(PSM_VALUE_AUTO)
             if psm_sent:
                 _LOGGER.info("PSM satt till auto (0) vid uppstart")
@@ -737,6 +751,23 @@ class EVLoadBalancerCoordinator:
 
         # Starta beräkningscykel för att återta normal drift
         self._schedule_calculation()
+
+    def _car_known_idle(self) -> bool:
+        """True bara när car_value går att läsa och visar att ingen bil är ansluten."""
+        car_entity = self._charger_entities.get("car_value", "")
+        state = self.hass.states.get(car_entity) if car_entity else None
+        return state is not None and state.state == _CAR_IDLE_STATE
+
+    def _read_psm_mode(self) -> PhaseMode | None:
+        """Fasläget enligt psm-entiteten; None vid auto eller om den inte går att läsa."""
+        psm_entity = self._charger_entities.get("psm", "")
+        state = self.hass.states.get(psm_entity) if psm_entity else None
+        if state is None:
+            return None
+        return {
+            PSM_VALUE_1PHASE: PhaseMode.ONE_PHASE,
+            PSM_VALUE_3PHASE: PhaseMode.THREE_PHASE,
+        }.get(state.state)
 
     def _read_charger_amp(self) -> int:
         """Laddarens inställda ström enligt amp-entiteten (D-10).

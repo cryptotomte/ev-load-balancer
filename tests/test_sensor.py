@@ -1828,10 +1828,12 @@ async def test_utilization_sensor_updates_after_calculation(hass, full_config_en
 async def test_coordinator_sends_psm_auto_on_setup(hass, full_config_entry):
     """Koordinatorn ska skicka PSM='0' (auto) som första kommando i async_setup().
 
-    Verifiera att send_psm anropas med PSM_VALUE_AUTO='0' under setup.
+    Verifiera att send_psm anropas med PSM_VALUE_AUTO='0' under setup, när
+    ingen bil är ansluten (spec 010 D-13).
     """
     from custom_components.ev_load_balancer.const import PSM_VALUE_AUTO
 
+    hass.states.async_set("sensor.goe_409787_car_value", "Idle")
     coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
 
     # Mocka send_psm för att fånga anropet
