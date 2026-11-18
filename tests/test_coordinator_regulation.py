@@ -471,3 +471,99 @@ async def test_r6_resume_is_capped_by_hold_time_ceiling(hass, freezer):
         assert rig.amps == [6, 11]
     finally:
         await rig.stop()
+
+
+# ---------------------------------------------------------------------------
+# D-16 / R-7, R-8: every command counts; substitutes and missing phases prove nothing
+# ---------------------------------------------------------------------------
+
+
+async def test_r8_unavailable_charger_sensor_gives_no_increase(hass, freezer):
+    """R-8 / D-16: with the charger sensors unavailable the substitute (last sent amp)
+
+    is constant, but it is no measurement: no increase however long it lasts.
+    """
+    rig = Rig(hass, freezer)
+    for sensor in CHARGER_CURRENT_SENSORS:
+        hass.states.async_set(sensor, "unavailable")
+    # belief 10 A from the amp entity; h = 15 - 10 = 5 A → target 16 A
+    await rig.start(phases=[15.0] * 3, charger=[], amp="10")
+    for sensor in CHARGER_CURRENT_SENSORS:
+        hass.states.async_set(sensor, "unavailable")
+    try:
+        await _report_every_5s(rig, [15.0] * 3, 60)
+        assert rig.amps == []
+    finally:
+        await rig.stop()
+
+
+async def test_r7_failsafe_command_counts_as_change_in_window(hass, freezer):
+    """R-7 / D-16: the failsafe reduction is a change in the window, like any command.
+
+    The car keeps drawing 4 A whatever is set, so the charger sensor never moves.
+    After recovery the target 13 A is an increase from 6 A, and it waits until the
+    failsafe command has left the 15 s window.
+    """
+    rig = Rig(hass, freezer)
+    # h = 14 - 4 = 10 A → budget 13 A = the charger's setting
+    await rig.start(phases=[14.0] * 3, charger=[4.0] * 3, amp="13")
+    try:
+        await _report_every_5s(rig, [14.0] * 3, 20)
+        assert rig.amps == []
+        hass.states.async_set(PHASE_SENSORS[1], "unavailable")
+        await rig.advance(0.5)
+        failsafe_at = dt_util.utcnow()
+        assert rig.amps == [6]
+        hass.states.async_set(CHARGER_ENTITIES["amp"], "6")
+
+        rig.report([14.0] * 3)
+        await rig.advance(5)
+        await _report_every_5s(rig, [14.0] * 3, 5)
+        assert rig.amps == [6]
+
+        await _report_every_5s(rig, [14.0] * 3, 10)
+        assert rig.amps == [6, 13]
+        assert (dt_util.utcnow() - failsafe_at).total_seconds() >= 15
+    finally:
+        await rig.stop()
+
+
+async def test_pause_and_phase_switch_count_as_changes_in_window(hass, freezer):
+    """D-16: pause (frc) and psm are recorded in the window like amp commands."""
+    rig = Rig(hass, freezer)
+    coordinator = await rig.start(phases=[20.5] * 3, charger=[15.5] * 3, amp="16")
+    try:
+        rig.report([34.5] * 3)
+        await rig.advance(0.5)
+        rig.charger([5.5] * 3)
+        for _ in range(6):
+            rig.report([24.5] * 3)
+            await rig.advance(5)
+            if rig.frc:
+                break
+        assert rig.frc == ["1"]
+        assert [0.0, 0.0, 0.0] in [values for _, values in coordinator._estimator._commands]
+    finally:
+        await rig.stop()
+
+    rig = Rig(hass, freezer)
+    coordinator = await rig.start(
+        phases=[20.5, 11.0, 5.0], charger=[15.5, 0.0, 0.0], amp="16", psm="1", pha=PHA_L1_ONLY
+    )
+    coordinator._phase_switcher.record_mode_change(
+        coordinator.phase_switcher_mode, dt_util.utcnow() - timedelta(seconds=300)
+    )
+    try:
+        await _report_every_5s(rig, [20.5, 11.0, 5.0], 70)
+        assert rig.psm == ["2"]
+        commands = [values for _, values in coordinator._estimator._commands]
+        assert [0.0, 0.0, 0.0] in commands
+        assert [12.0, 12.0, 12.0] in commands
+    finally:
+        await rig.stop()
+
+
+def test_no_active_configured_phase_is_not_unambiguous(hass):
+    """D-16: active phases that map to no configured phase give no ceiling (no vacuous all())."""
+    coordinator = EVLoadBalancerCoordinator(hass, _entry())
+    assert coordinator._up_ceiling(dt_util.utcnow(), [5.0] * 3, [0.0] * 3, []) is None

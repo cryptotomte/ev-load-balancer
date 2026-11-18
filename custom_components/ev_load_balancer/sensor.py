@@ -626,7 +626,7 @@ class EVLoadBalancerCoordinator:
         new_state = event.data.get("new_state")
 
         if entity_id in self._device_sensor_ids:
-            self._estimator.record_device(utcnow(), self._read_device_values_sync())
+            self._estimator.record_device(utcnow(), *self._read_device_sync())
             return
 
         if entity_id in self._phase_sensor_ids:
@@ -699,7 +699,8 @@ class EVLoadBalancerCoordinator:
             )
             self._state_machine.enter_failsafe(current_sm_state)
             self._pause_reason = "sensor_unavailable"
-            await self._dispatcher.pause()
+            if await self._dispatcher.pause():
+                self._estimator.record_command(utcnow(), [0.0] * len(self._phases))
         else:
             # Enskild sensorförlust — följ konfigurerad action
             _LOGGER.error(
@@ -711,12 +712,18 @@ class EVLoadBalancerCoordinator:
             self._state_machine.enter_failsafe(current_sm_state)
             self._pause_reason = "sensor_unavailable"
 
+            now = utcnow()
             if self._action_on_sensor_loss == "pause":
-                await self._dispatcher.pause()
+                if await self._dispatcher.pause():
+                    self._estimator.record_command(now, [0.0] * len(self._phases))
             elif await self._dispatcher.send_amp(self._safe_default_current):
                 # R-7: annars blir nästa "sänkning" en okontrollerad höjning
                 self._last_sent_amp = self._safe_default_current
-                self._hysteresis.record_amp_change(utcnow())
+                self._hysteresis.record_amp_change(now)
+                # D-16; alla faser, eftersom aktiva faser inte är kända under failsafe
+                self._estimator.record_command(
+                    now, [float(self._safe_default_current)] * len(self._phases)
+                )
 
         self._notify_all_listeners()
 
@@ -790,21 +797,29 @@ class EVLoadBalancerCoordinator:
         return self._max_current
 
     def _read_device_values_sync(self) -> list[float]:
-        """Läs laddarens ström per fas synkront.
+        """Läs laddarens ström per fas synkront (se _read_device_sync)."""
+        return self._read_device_sync()[0]
+
+    def _read_device_sync(self) -> tuple[list[float], list[bool]]:
+        """Läs laddarens ström per fas synkront, med flagga för ersättningsvärde.
 
         Fallback-logik (PR-05/US3):
         - Om laddarens nrg-sensor är unavailable: använd _last_sent_amp
           som fallback-värde och logga WARNING.
         - Om sensorn saknas helt: använd 0.0A som tidigare.
+        Ett ersättningsvärde flaggas; det gör aldrig ett mätvärde entydigt (D-16).
         """
         device_values: list[float] = []
+        substitute: list[bool] = []
         for _, key in zip(self._phases, ("nrg_4", "nrg_5", "nrg_6")):
             entity_id = self._charger_entities.get(key, "")
+            substitute.append(True)
             if entity_id:
                 state = self.hass.states.get(entity_id)
                 if state and state.state not in ("unavailable", "unknown", ""):
                     try:
                         device_values.append(float(state.state))
+                        substitute[-1] = False
                         continue
                     except (ValueError, TypeError):
                         _LOGGER.debug(
@@ -823,7 +838,7 @@ class EVLoadBalancerCoordinator:
                     device_values.append(float(self._last_sent_amp))
                     continue
             device_values.append(0.0)
-        return device_values
+        return device_values, substitute
 
     def _read_active_phases_sync(self) -> list[int]:
         """Läs aktiva fasnummer synkront med prioritetsordning: pha → map → fallback.
@@ -938,8 +953,8 @@ class EVLoadBalancerCoordinator:
                 self._notify_all_listeners()
                 return
 
-        device_values = self._read_device_values_sync()
-        self._estimator.record_device(now, device_values)
+        device_values, substitute = self._read_device_sync()
+        self._estimator.record_device(now, device_values, substitute)
         for idx, reported in enumerate(phase_reported):
             if reported != self._processed_reports[idx]:
                 self._processed_reports[idx] = reported
@@ -1050,6 +1065,9 @@ class EVLoadBalancerCoordinator:
                 )
                 psm_sent = await self._dispatcher.send_psm(psm_value)
                 if psm_sent:
+                    # D-16: laddningen avbryts och startar på nya faser.
+                    self._estimator.record_command(now, [0.0] * n_phases)
+                    self._estimator.record_command(now, [float(self._last_sent_amp)] * n_phases)
                     from_mode = self._phase_switcher.current_mode
                     self._phase_switcher.record_mode_change(phase_cmd.target_mode, now)
                     self.fire_phase_switched_event(
@@ -1098,6 +1116,7 @@ class EVLoadBalancerCoordinator:
                 # Pausa laddning — övergå till PAUSED
                 paused = await self._dispatcher.pause()
                 if paused:
+                    self._estimator.record_command(now, [0.0] * n_phases)
                     self._state_machine.on_below_min_current()
                     self._pause_reason = "insufficient_capacity"
                     _LOGGER.warning(
@@ -1201,7 +1220,8 @@ class EVLoadBalancerCoordinator:
         annars målet med den högsta skattningen under hålltiden.
         """
         estimates = self._estimator.estimates
-        if not all(estimates[idx].tight for idx in active_idx):
+        # D-16: utan aktiv fas i konfigurationen bevisar inget mätvärde något.
+        if not active_idx or not all(estimates[idx].tight for idx in active_idx):
             return None
         return self._hold_ceiling(now, phase_values, device_values, active_idx)
 

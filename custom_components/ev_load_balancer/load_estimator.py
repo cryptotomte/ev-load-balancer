@@ -43,7 +43,8 @@ class PhaseEstimate:
     """Skattningen h efter rapporten (A)."""
 
     tight: bool
-    """Entydigt: hög − låg ≤ toleransen och historiken täcker hela fönstret."""
+    """Entydigt: hög − låg ≤ toleransen, historiken täcker hela fönstret och
+    inget laddarvärde i fönstret är ett ersättningsvärde (D-16)."""
 
 
 class LoadEstimator:
@@ -62,7 +63,7 @@ class LoadEstimator:
         """Initialisera utan historik."""
         self._window = timedelta(seconds=window_s)
         self._hold = timedelta(seconds=hold_s)
-        self._device: list[tuple[datetime, list[float]]] = []
+        self._device: list[tuple[datetime, list[float], list[bool]]] = []
         self._commands: list[tuple[datetime, list[float]]] = []
         self._estimates: list[PhaseEstimate | None] = [None] * phase_count
         self._household_history: list[list[tuple[datetime, float]]] = [
@@ -74,9 +75,17 @@ class LoadEstimator:
         """Senaste skattning per fas, None för fas som ännu inte rapporterat."""
         return list(self._estimates)
 
-    def record_device(self, now: datetime, values: list[float]) -> None:
-        """Registrera laddarens ström per fas vid tidpunkten now."""
-        self._device.append((now, list(values)))
+    def record_device(
+        self, now: datetime, values: list[float], substitute: list[bool] | None = None
+    ) -> None:
+        """Registrera laddarens ström per fas vid tidpunkten now.
+
+        substitute anger per fas att värdet inte är uppmätt utan ett
+        ersättningsvärde (sensorn saknas eller är otillgänglig). Ett sådant värde
+        bevisar ingenting, så rapporter med det i fönstret är aldrig entydiga (D-16).
+        """
+        flags = list(substitute) if substitute is not None else [False] * len(values)
+        self._device.append((now, list(values), flags))
         # 2W: rapporten behandlas efter sin rapporttid (last_reported), så dess
         # fönster börjar före now − W.
         cutoff = now - 2 * self._window
@@ -108,15 +117,17 @@ class LoadEstimator:
         rapport (vakttest T-15).
         """
         start = now - self._window
-        in_window = [v[phase] for t, v in self._device if start < t <= now]
-        before = [v[phase] for t, v in self._device if t <= start]
+        entries = [(v[phase], f[phase]) for t, v, f in self._device if start < t <= now]
+        before = [(v[phase], f[phase]) for t, v, f in self._device if t <= start]
         if before:
-            in_window.append(before[-1])
-        current = self._current_device(now, phase)
-        if not in_window:
+            entries.append(before[-1])
+        if not entries:
             # Rapporten är äldre än historiken (värdet skrevs före start). Laddarens
             # ström då är okänd; historiken täcker inte fönstret, så inte entydigt.
-            in_window.append(current)
+            entries.append((self._device[0][1][phase], self._device[0][2][phase]))
+        current = self._current_device(now, phase)
+        in_window = [value for value, _ in entries]
+        substituted = any(flag for _, flag in entries)
         in_window.extend(v[phase] for t, v in self._commands if start <= t <= now)
 
         device_min = min(in_window)
@@ -136,7 +147,7 @@ class LoadEstimator:
             low=low,
             high=high,
             household=household,
-            tight=covered and high - low <= ESTIMATE_TIGHT_TOLERANCE,
+            tight=covered and not substituted and high - low <= ESTIMATE_TIGHT_TOLERANCE,
         )
         self._estimates[phase] = estimate
 
@@ -168,5 +179,5 @@ class LoadEstimator:
 
         Före första värdet gäller det första värdet.
         """
-        earlier = [v[phase] for t, v in self._device if t <= now]
+        earlier = [v[phase] for t, v, _ in self._device if t <= now]
         return earlier[-1] if earlier else self._device[0][1][phase]

@@ -189,3 +189,42 @@ def test_peak_holds_highest_household_for_hold_time():
     assert est.peak(_at(110))[1] == pytest.approx(14.0)
     assert est.peak(_at(141))[1] == pytest.approx(8.0)
     assert est.peak(_at(141))[0] is None
+
+
+def test_substitute_charger_value_is_never_tight():
+    """D-16 / R-8: a substitute charger value in the window makes no report unambiguous.
+
+    A constant substitute (last sent amp) would otherwise look like a steady charger.
+    """
+    est = _estimator()
+    est.record_device(_at(0), [10.0, 10.0, 10.0], substitute=[True, False, False])
+
+    l1 = est.on_phase_report(_at(20), 0, 18.0)
+    l2 = est.on_phase_report(_at(20), 1, 18.0)
+    est.record_device(_at(21), [10.0, 10.0, 10.0])
+    still = est.on_phase_report(_at(30), 0, 18.0)
+    measured = est.on_phase_report(_at(37), 0, 18.0)
+
+    assert l1.low == l1.high
+    assert l1.tight is False
+    assert l2.tight is True
+    assert still.tight is False
+    assert measured.tight is True
+
+
+def test_first_report_uses_current_charger_value_after_change_in_window():
+    """K-1 / 6.1: the first report sets h = P − current charger current, also when the
+
+    charger changed inside the window: the charger fell on L1 and rose on L2.
+    """
+    est = _estimator()
+    est.record_device(_at(0), [15.5, 6.5, 15.5])
+    est.record_device(_at(10), [6.5, 15.5, 15.5])
+
+    fell = est.on_phase_report(_at(12), 0, 20.0)
+    rose = est.on_phase_report(_at(12), 1, 20.0)
+
+    assert (fell.low, fell.high) == (pytest.approx(4.5), pytest.approx(13.5))
+    assert fell.household == pytest.approx(13.5)
+    assert (rose.low, rose.high) == (pytest.approx(4.5), pytest.approx(13.5))
+    assert rose.household == pytest.approx(4.5)
