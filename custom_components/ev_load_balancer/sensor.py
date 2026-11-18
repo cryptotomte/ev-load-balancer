@@ -541,10 +541,10 @@ class EVLoadBalancerCoordinator:
             )
             self._remove_listeners.append(remove_fn)
 
-        # PRELIMINARY (spec 010 P-3): fassensorn antas skriva även oförändrade
-        # värden (state_reported). Gör den inte det uppdateras skattningen bara
-        # när värdet ändras, vilket fortfarande fungerar men ger färre entydiga
-        # mätvärden.
+        # Ett oförändrat värde som skrivs igen (state_reported) är ett nytt mätvärde.
+        # P-3 är mätt falskt i referensinstallationen (spec 010 avsnitt 10): där
+        # skrivs bara ändrade värden, upp till 570 s isär. Regleringen beror därför
+        # inte på dessa rapporter; klockan (D-12) låter tidsvillkoren löpa ut.
         if self._phase_sensor_ids:
             self._remove_listeners.append(
                 async_track_state_report_event(

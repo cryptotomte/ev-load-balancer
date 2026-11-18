@@ -85,7 +85,12 @@ UP_HOLD_RANGE = (0, 600)
 """Tillåtet intervall för hålltiden, sekunder (K-9)."""
 
 ESTIMATE_TIGHT_TOLERANCE = 0.5
-"""Största hög − låg (A) för att ett mätvärde ska räknas som entydigt (K-4)."""
+"""Största hög − låg (A) för att ett mätvärde ska räknas som entydigt (K-4).
+
+PRELIMINARY (spec 010 P-7): laddarens ström antas variera mindre än 0,5 A i vila.
+Gör den inte det blir inget mätvärde entydigt och strömmen höjs aldrig.
+Kontrolleras i fälttestet (fältet entydig= i loggraden K-7).
+"""
 
 SAMPLE_COALESCE_SECONDS = 0.2
 """Fasrapporter inom denna tid behandlas som ett mätvärde (K-6)."""
