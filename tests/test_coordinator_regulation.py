@@ -808,7 +808,11 @@ async def test_t13_sensor_loss_through_listener_failsafe_and_recovery(hass, free
         assert rig.amps == [6]
 
         calls.clear()
-        for _ in range(4):
+        for car in ("Complete", "Charging"):
+            rig.car(car)
+            hass.states.async_set(
+                CHARGER_ENTITIES["map"], "[1, 2]" if car == "Complete" else "[1, 2, 3]"
+            )
             hass.states.async_set(PHASE_SENSORS[0], "20.50")
             hass.states.async_set(PHASE_SENSORS[2], "21.00")
             await rig.advance(5)
