@@ -100,6 +100,11 @@ def single_phase_entry():
     )
 
 
+def _entity(entry: MockConfigEntry, key: str) -> str:
+    """Hjälpfunktion: laddarentitet ur config entry (håller serienumret ur nya tester)."""
+    return entry.data["charger_entities"][key]
+
+
 def _make_mock_state(state_value: str):
     """Hjälpfunktion: skapa MockState med ett givet state-värde."""
     mock_state = MagicMock()
@@ -373,10 +378,13 @@ def test_charger_current_change_only_records_history(hass, full_config_entry):
         mock_debouncer_cls.return_value = mock_debouncer
         coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
 
-    hass.states.async_set("sensor.goe_409787_nrg_4", "6.5")
+    hass.states.async_set(_entity(full_config_entry, "nrg_4"), "6.5")
     with patch.object(hass, "async_create_task") as mock_create_task:
         coordinator._handle_state_change(
-            _state_event("sensor.goe_409787_nrg_4", hass.states.get("sensor.goe_409787_nrg_4"))
+            _state_event(
+                _entity(full_config_entry, "nrg_4"),
+                hass.states.get(_entity(full_config_entry, "nrg_4")),
+            )
         )
 
     mock_debouncer.async_schedule_call.assert_not_called()
@@ -1007,10 +1015,10 @@ async def test_t10_charger_current_changes_send_no_command(hass, full_config_ent
     hass.states.async_set("sensor.current_l1", "20.5")
     hass.states.async_set("sensor.current_l2", "20.5")
     hass.states.async_set("sensor.current_l3", "20.5")
-    hass.states.async_set("sensor.goe_409787_map", "[1, 2, 3]")
-    hass.states.async_set("sensor.goe_409787_car_value", "Charging")
+    hass.states.async_set(_entity(full_config_entry, "map"), "[1, 2, 3]")
+    hass.states.async_set(_entity(full_config_entry, "car_value"), "Charging")
     for sensor in ("nrg_4", "nrg_5", "nrg_6"):
-        hass.states.async_set(f"sensor.goe_409787_{sensor}", "15.5")
+        hass.states.async_set(_entity(full_config_entry, sensor), "15.5")
 
     coordinator = EVLoadBalancerCoordinator(hass, full_config_entry)
     sm = coordinator._state_machine
@@ -1026,7 +1034,7 @@ async def test_t10_charger_current_changes_send_no_command(hass, full_config_ent
 
     for value in ("12.0", "9.0", "6.0", "5.5"):
         for sensor in ("nrg_4", "nrg_5", "nrg_6"):
-            hass.states.async_set(f"sensor.goe_409787_{sensor}", value)
+            hass.states.async_set(_entity(full_config_entry, sensor), value)
         async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=1))
         await hass.async_block_till_done()
 
@@ -1056,9 +1064,9 @@ async def test_t12_no_history_allows_reduction_but_not_increase(hass, full_confi
     T0 = datetime(2025, 1, 1, 12, 0, 0)
 
     for sensor in ("nrg_4", "nrg_5", "nrg_6"):
-        hass.states.async_set(f"sensor.goe_409787_{sensor}", "0.0")
-    hass.states.async_set("sensor.goe_409787_map", "[1, 2, 3]")
-    hass.states.async_set("sensor.goe_409787_car_value", "Charging")
+        hass.states.async_set(_entity(full_config_entry, sensor), "0.0")
+    hass.states.async_set(_entity(full_config_entry, "map"), "[1, 2, 3]")
+    hass.states.async_set(_entity(full_config_entry, "car_value"), "Charging")
 
     async def report_at(seconds: float, load: str) -> None:
         for sensor in ("sensor.current_l1", "sensor.current_l2", "sensor.current_l3"):
@@ -1099,10 +1107,10 @@ async def test_recalculation_without_new_report_keeps_estimate(hass, full_config
     coordinator._last_sent_amp = 15
     T0 = datetime(2025, 1, 1, 12, 0, 0)
 
-    hass.states.async_set("sensor.goe_409787_map", "[1, 2, 3]")
-    hass.states.async_set("sensor.goe_409787_car_value", "Charging")
+    hass.states.async_set(_entity(full_config_entry, "map"), "[1, 2, 3]")
+    hass.states.async_set(_entity(full_config_entry, "car_value"), "Charging")
     for sensor in ("nrg_4", "nrg_5", "nrg_6"):
-        hass.states.async_set(f"sensor.goe_409787_{sensor}", "15.5")
+        hass.states.async_set(_entity(full_config_entry, sensor), "15.5")
     for sensor in ("sensor.current_l1", "sensor.current_l2", "sensor.current_l3"):
         hass.states.async_set(sensor, "23.5")
     # h = 23.5 - 15.5 = 8 A → budget 15 A
@@ -1112,9 +1120,9 @@ async def test_recalculation_without_new_report_keeps_estimate(hass, full_config
     # Laddaren går ner till 6 A; bilstatus ändras två gånger utan ny fasrapport.
     # Vid t=40 ligger 15.5 A utanför fönstret: 23.5 - 6.0 vore 17.5 A hushåll.
     for sensor in ("nrg_4", "nrg_5", "nrg_6"):
-        hass.states.async_set(f"sensor.goe_409787_{sensor}", "6.0")
+        hass.states.async_set(_entity(full_config_entry, sensor), "6.0")
     for seconds, car_value in ((20, "Complete"), (40, "Charging")):
-        hass.states.async_set("sensor.goe_409787_car_value", car_value)
+        hass.states.async_set(_entity(full_config_entry, "car_value"), car_value)
         with patch(
             "custom_components.ev_load_balancer.sensor.utcnow",
             return_value=T0 + timedelta(seconds=seconds),
@@ -1146,9 +1154,9 @@ async def test_sent_command_counts_as_change_in_window(hass, full_config_entry):
     T0 = datetime(2025, 1, 1, 12, 0, 0)
 
     for sensor in ("nrg_4", "nrg_5", "nrg_6"):
-        hass.states.async_set(f"sensor.goe_409787_{sensor}", "0.0")
-    hass.states.async_set("sensor.goe_409787_map", "[1, 2, 3]")
-    hass.states.async_set("sensor.goe_409787_car_value", "Charging")
+        hass.states.async_set(_entity(full_config_entry, sensor), "0.0")
+    hass.states.async_set(_entity(full_config_entry, "map"), "[1, 2, 3]")
+    hass.states.async_set(_entity(full_config_entry, "car_value"), "Charging")
 
     async def report_at(seconds: float, load: str) -> None:
         for sensor in ("sensor.current_l1", "sensor.current_l2", "sensor.current_l3"):
