@@ -1109,14 +1109,17 @@ async def test_recalculation_without_new_report_keeps_estimate(hass, full_config
     with patch("custom_components.ev_load_balancer.sensor.utcnow", return_value=T0):
         await coordinator._async_calculate()
 
+    # Laddaren går ner till 6 A; bilstatus ändras två gånger utan ny fasrapport.
+    # Vid t=40 ligger 15.5 A utanför fönstret: 23.5 - 6.0 vore 17.5 A hushåll.
     for sensor in ("nrg_4", "nrg_5", "nrg_6"):
         hass.states.async_set(f"sensor.goe_409787_{sensor}", "6.0")
-    hass.states.async_set("sensor.goe_409787_car_value", "Complete")
-    with patch(
-        "custom_components.ev_load_balancer.sensor.utcnow",
-        return_value=T0 + timedelta(seconds=40),
-    ):
-        await coordinator._async_calculate()
+    for seconds, car_value in ((20, "Complete"), (40, "Charging")):
+        hass.states.async_set("sensor.goe_409787_car_value", car_value)
+        with patch(
+            "custom_components.ev_load_balancer.sensor.utcnow",
+            return_value=T0 + timedelta(seconds=seconds),
+        ):
+            await coordinator._async_calculate()
 
     coordinator._dispatcher.send_amp.assert_not_called()
     assert coordinator.last_result.charger_budget_l1 == pytest.approx(15.0)

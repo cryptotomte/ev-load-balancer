@@ -16,7 +16,7 @@ from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
-    async_fire_time_changed,
+    async_fire_time_changed_exact,
     async_mock_service,
 )
 
@@ -224,7 +224,9 @@ class ClosedLoop:
             self.freezer.tick(DT)
             self.charger.advance(self.now, DT)
             self._write_inputs()
-            async_fire_time_changed(self.hass, dt_util.utcnow())
+            # Exact: the plain helper adds 0.5 s and would fire the 0.2 s coalescing
+            # timer (K-6) one step early.
+            async_fire_time_changed_exact(self.hass, dt_util.utcnow())
             await self.hass.async_block_till_done()
             self._apply_commands()
         return self.trace
