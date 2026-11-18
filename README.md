@@ -16,8 +16,12 @@ modes and charger profiles. MVP: go-e Gemini flex.
 
 - **Phase-specific load balancing** — measures and balances current per phase (L1, L2, L3)
 - **Event-driven calculation** with immediate downward adjustment on load increase
-- **Automatic phase switching** — dynamically switches between 3-phase and 1-phase charging
-- **Hysteresis against hunting** — debouncer (5s) prevents rapid on/off oscillation
+- **Stable charging current** — the household load is estimated from the phase value and the
+  charger's current at the same moment, so the charger's own changes never look like new load
+- **Hold time before increase** — the current is raised only when the household load has
+  stayed low for a while (default 90 s)
+- **Automatic phase switching** — dynamically switches between 3-phase and 1-phase charging,
+  at most once every 300 s
 - **Failsafe on sensor loss** — reduce (6A) or pause depending on configuration
 - **Configurable safety margin** — adds a buffer below the fuse limit
 - **Charger profiles** — modular support for different charger models (MVP: go-e Gemini flex)
@@ -32,50 +36,46 @@ modes and charger profiles. MVP: go-e Gemini flex.
 EV Load Balancer operates in a continuous cycle: measure → calculate → control.
 
 ```
-Current per phase at the fuse
-  sensor.current_be1_30051 (L1: 18.3 A)
-  sensor.current_be2_30051 (L2: 12.1 A)
-  sensor.current_be3_30051 (L3: 15.7 A)
+Current per phase at the fuse (P)        Charger's own current per phase
+  sensor.grid_current_l1 (L1: 18.3 A)      sensor.goe_{serial}_nrg_4/5/6
+  sensor.grid_current_l2 (L2: 12.1 A)      (kept as history, no calculation)
+  sensor.grid_current_l3 (L3: 15.7 A)
+            │                                       │
+            ▼                                       ▼
+    ┌──────────────────────────────────────────────────────┐
+    │  Household load per phase (h)                        │
+    │  P is a few seconds old when it arrives, so it is    │
+    │  compared with the charger's current during the      │
+    │  last W seconds (measurement window, default 15 s):  │
+    │    low  = P - highest charger current in the window  │
+    │    high = P - lowest charger current in the window   │
+    │    h is kept within [low, high]                      │
+    │                                                      │
+    │  Budget per phase = 25 - h - 2 (margin)              │
+    │  target_current = floor(lowest budget of the active  │
+    │    phases), clamped to [6, 16] A                     │
+    └──────────────────────────────────────────────────────┘
             │
             ▼
-    ┌─────────────────────────────────┐
-    │         Calculation             │
-    │                                 │
-    │  Available per phase:           │
-    │  L1: 25 - 2 (margin) - 18.3     │
-    │     = 4.7 A                     │
-    │  L2: 25 - 2 - 12.1 = 10.9 A     │
-    │  L3: 25 - 2 - 15.7 = 7.3 A      │
-    │                                 │
-    │  available_min = min(4.7,       │
-    │    10.9, 7.3) = 4.7 A           │
-    │                                 │
-    │  target_current = floor(4.7)    │
-    │    = 4 → clamped to [6, 16] A   │
-    └─────────────────────────────────┘
+    ┌───────────────────────┐    ┌─────────────────────────┐
+    │   Control             │    │   Pause and phases      │
+    │                       │    │                         │
+    │  Lower target: sent   │    │  budget < min 15 s      │
+    │  at once              │    │    → PAUSE              │
+    │                       │    │  budget > min+2 A 30 s  │
+    │  Higher target: only  │    │    → RESUME (capped     │
+    │  on an unambiguous    │    │      like an increase)  │
+    │  value, capped by the │    │                         │
+    │  hold time (90 s),    │    │  all phases >= 6 A for  │
+    │  5 s between raises   │    │  60 s → 3-phase; at     │
+    │                       │    │  most one switch / 300 s│
+    └───────────────────────┘    └─────────────────────────┘
             │
-            ▼
-    ┌───────────────────┐    ┌─────────────────────┐
-    │   Control         │    │   Pause logic       │
-    │                   │    │                     │
-    │  Immediate down-  │    │  available_min      │
-    │  ward adjustment  │    │  < min 15s→ PAUSE   │
-    │  on load          │    │                     │
-    │  increase         │    │  > min+2A 30s→RESUME│
-    │                   │    │                     │
-    │  5s cooldown      │    │  Phase switching:   │
-    │  upward adjust.   │    │  all phases >= 6A   │
-    └───────────────────┘    │  for 60s → 3-phase  │
-            │                └─────────────────────┘
             ▼
   number.goe_{serial}_amp  (sets charging current)
   select.goe_{serial}_frc  (pause/resume)
   select.goe_{serial}_psm  (phase selection)
 ```
-
-> **Simplification:** The diagram above shows a simplification — the actual calculation
-> subtracts the charger's own draw (`device_load`) from the phase load before calculating
-> available capacity: `max_a - (phase_load - device_load) - safety_margin`.
 
 The status sensor exposes all calculation details as attributes — useful for debugging
 and dashboard cards:
@@ -84,13 +84,39 @@ and dashboard cards:
 
 ### Calculation logic (step by step)
 
-1. **Measurement**: Reads current per phase from configured phase sensors
-2. **Available capacity**: `(max_ampere - safety_margin - measured_current)` per phase
-3. **Limiting phase**: `available_min = min(available_L1, available_L2, available_L3)`
-4. **Target current**: `target_current = floor(available_min)`, clamped to [min_current, max_current]
-5. **Control**: Writes new current to the charger entity — immediately on downward adjustment, 5s debounce on upward adjustment
-6. **Pause**: If `available_min < min_current` for 15 seconds → pause charging
-7. **Resume**: If `available_min > (min_current + 2A)` for 30 seconds → resume charging
+1. **Sample**: A new value from a phase sensor is a sample. Values from the three phase
+   sensors that arrive within 0.2 s are one sample. A change of the charger's own current
+   (`nrg_4/5/6`) only adds to the history; it never starts a calculation.
+2. **Household load**: Per phase, the phase value `P` is compared with the charger's current
+   during the last `W` seconds before the value was reported (the measurement window). The
+   household load `h` is kept within `[P - highest, P - lowest]` charger current in the window.
+   If the charger stood still, `h` is exact; if it changed, `h` moves only as far as the value
+   proves.
+3. **Budget**: `max_ampere - h - safety_margin` per phase. `target_current = floor(lowest
+   budget of the active phases)`, clamped to [min_current, max_current].
+4. **Lower target**: sent at once, in one step, at the first value that proves the higher load.
+5. **Higher target**: sent only when the latest value on every active phase was unambiguous
+   (`high - low` at most 0.5 A, with history covering the whole window), and never above what
+   the highest household load of the hold time (default 90 s) allows. At least 5 s between
+   increases. Every command the balancer sends (current, pause, phase switch) counts as a
+   change in the window, so after its own command the next increase is possible only when
+   the window has passed.
+6. **Pause**: If the budget is below min_current for 15 seconds → pause charging.
+7. **Resume**: If the budget is above min_current + 2 A for 30 seconds → resume charging,
+   capped like an increase (step 5).
+8. **Phase switching**: 3 → 1 phase at once when a phase lacks capacity; 1 → 3 phase when all
+   phases have had at least min_current for 60 s. Before switching up, the current is first
+   reduced to what all phases allow. No new phase switch within 300 s of the previous one;
+   during that time a shortage is handled by a lower current and, if needed, a pause.
+9. **Clock**: While charging or paused, the balancer recalculates every 5 s with the existing
+   estimate, so the pause, resume, phase switch and hold timers run out even when no new
+   phase values arrive. This is not a new sample.
+10. **Car plugged in or out**: When the car is plugged in, the calculated current is sent at
+    once. When it is unplugged, the current is set to min_current.
+11. **Start and reload**: The balancer reads the charger's current setting (`amp`) and starts
+    from it (max_current if it cannot be read), so a lower target is sent with the first
+    sample. If a car is charging, the phase setting (`psm`) is left as it is and no phase
+    switch is made for 300 s.
 
 ---
 
@@ -108,7 +134,8 @@ Verify the following before installation:
 
 **Home Assistant integrations:**
 - [ ] Charger integration installed in HA (e.g. [ha-goecharger-api2](https://github.com/cathiele/ha-goecharger-api2) for go-e)
-- [ ] Phase sensors exposed in HA (e.g. via Nibe Modbus, P1 port, Shelly EM)
+- [ ] Phase sensors exposed in HA (e.g. via P1 port, Shelly EM) that update at least every
+      20 seconds — see the note below the table
 
 **Network requirements:**
 - [ ] Home Assistant and the EV charger on the same network (or routable)
@@ -118,7 +145,7 @@ Verify the following before installation:
 
 | Option | Integration | Sensors |
 |---|---|---|
-| Nibe Modbus (heat pump) | nibe-hass | `sensor.current_be1_30051`, `be2`, `be3` |
+| Nibe Modbus (heat pump) | nibe-hass | ⚠️ Not suitable: BE1–BE3 written every 61 s (measured) |
 | P1 port (Tibber, Easee home) | tibber-local | Per-phase current |
 | Shelly EM | Shelly HA | Per-phase current |
 | Eigil Stromberg | Modbus | Per-phase current |
@@ -126,6 +153,11 @@ Verify the following before installation:
 > **Important:** The sensors must show current in Ampere per phase *at the main fuse* —
 > not at the distribution board or at the charger. It is the total load per phase
 > that determines whether the fuse is at risk of tripping.
+
+> **Update rate:** A phase sensor must update at least every 20 seconds. A new phase value
+> is what lets the balancer reduce the current, so a slow sensor delays every reduction.
+> Measured counter-example: Nibe's current sensors (BE1–BE3) are written every 61 seconds
+> and are not good enough.
 
 ---
 
@@ -203,6 +235,15 @@ Settings can be adjusted afterwards without having to remove and recreate the in
 - **Calculation parameters** — safety margin, min/max current
 - **Failsafe behavior** — action on sensor loss (reduce/pause) and safe default current
 - **Capacity warning threshold** — limit in Ampere for warning sensor (default 3A)
+- **Advanced settings** — a collapsed section at the bottom of the calculation parameters step:
+
+  | Setting | Default | Allowed | What it does |
+  |---|---|---|---|
+  | Measurement window (s) | 15 | 3–30 | How far back the charger's current is compared with each phase value. Must be longer than the meter's update interval plus the time it takes for the value to reach Home Assistant. A window that is too short makes the charge current oscillate. |
+  | Hold time before increase (s) | 90 | 0–600 | How long the household load must have stayed low before the charge current is raised. |
+
+  The defaults suit an electricity meter that updates every 10 seconds. Existing installations
+  use the defaults until the settings are changed.
 
 Open Options Flow via: **Settings** → **Devices & Services** → **EV Load Balancer** → ⚙️
 
@@ -283,6 +324,9 @@ measurement `ev_load_balancer_events`.
 | `ev_load_balancer_device_paused` | ev_load_balancer_events | event_type, charger_profile, state | reason, available_min |
 | `ev_load_balancer_device_resumed` | ev_load_balancer_events | event_type, charger_profile, state | reason, available_min |
 | `ev_load_balancer_phase_switched` | ev_load_balancer_events | event_type, charger_profile | from_mode, to_mode, reason |
+
+`ev_load_balancer_phase_switched` is fired on every phase switch the balancer makes (earlier
+versions listed it but never fired it). `from_mode` and `to_mode` are `1-phase` or `3-phase`.
 
 ### Grafana queries
 
